@@ -92,7 +92,7 @@ parser.add_argument("--r", type=int, default=16)
 parser.add_argument("--b", type=int, default=8)
 parser.add_argument("--lr", type=float, default=3e-4)
 parser.add_argument("--alpha", type=float, default=0.25)
-parser.add_argument("--checkpoint-root", type=Path, default=Path("./sft_checkpoints"))
+parser.add_argument("--checkpoint-root", type=Path, default=Path("."))
 parser.add_argument("--wandb", action="store_true")
 args = parser.parse_args()
 SEED = args.seed
@@ -100,17 +100,36 @@ R = args.r
 B = args.b
 LR = args.lr
 ALPHA = args.alpha  # weight given to continuation wrt thinking
-lora_config = LoraConfig(r=R, target_modules="all-linear", lora_alpha=2 * R)
 device = "cuda:0"
+model_name, cache_dir = "Qwen/Qwen3-1.7B-Base", "/scratch/hub"
 
-config = {"learning_rate": LR, "batch_size": B, "alpha": ALPHA, "rank": R, "seed": SEED}
+tokenizer = AutoTokenizer.from_pretrained(model_name, cache_dir=cache_dir)
+tokenizer.padding_side = "right"
+tokenizer.pad_token = tokenizer.eos_token
 
+lora_config = LoraConfig(
+    r=R,
+    target_modules="all-linear",
+    lora_alpha=2 * R,
+    trainable_token_indices=tokenizer.convert_tokens_to_ids(["<think>", "</think>"]),
+)
+
+config = {
+    "learning_rate": LR,
+    "batch_size": B,
+    "alpha": ALPHA,
+    "rank": R,
+    "seed": SEED,
+}
+
+run_name = "sft-training-think-tokens"
 if args.wandb:
-    wandb_run = wandb.init(project="rl-ntp", name=f"sft-{R}-{LR}", config=config)
-    sweep_suffix = f"-{wandb_run.sweep_id}" if wandb_run.sweep_id else ""
-else:
-    sweep_suffix = ""
-CHECKPOINT_ROOT = Path(f"{args.checkpoint_root}{sweep_suffix}-{R}-{LR}")
+    wandb.init(
+        project="rl-ntp",
+        name=f"{run_name}-{R}-{LR}",
+        config=config,
+    )
+CHECKPOINT_ROOT = args.checkpoint_root / f"{run_name}-checkpoints" / f"run-{R}-{LR}"
 
 random.seed(SEED)
 torch.manual_seed(SEED)
@@ -120,7 +139,6 @@ torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
 dataloader_generator = torch.Generator().manual_seed(SEED)
 
-model_name, cache_dir = "Qwen/Qwen3-1.7B-Base", "/scratch/hub"
 model = AutoModelForCausalLM.from_pretrained(
     model_name,
     cache_dir=cache_dir,
@@ -128,13 +146,9 @@ model = AutoModelForCausalLM.from_pretrained(
     attn_implementation="sdpa",
 )
 model.config.use_cache = False
+model.config.pad_token_id = tokenizer.pad_token_id
 model.gradient_checkpointing_enable()
 model.enable_input_require_grads()
-
-tokenizer = AutoTokenizer.from_pretrained(model_name, cache_dir=cache_dir)
-tokenizer.padding_side = "right"
-tokenizer.pad_token = tokenizer.eos_token
-model.config.pad_token_id = tokenizer.pad_token_id
 
 lora_model = get_peft_model(model, lora_config)
 optimizer = optim.AdamW(params=lora_model.parameters(), lr=LR, fused=True)
@@ -186,16 +200,17 @@ for batch_idx, batch in enumerate(dataloader):
     optimizer.step()
 
     if args.wandb:
-        wandb.log(
-            {
-                "loss": loss.item(),
-                "loss_think": loss_think.item(),
-                "loss_continuation": loss_continuation.item(),
-                "grad_norm": grad_norm.item(),
-            },
-            step=batch_idx,
-            commit=True,
-        )
+        if batch_idx % 5 == 0 or batch_idx == len(dataloader) - 1:
+            wandb.log(
+                {
+                    "loss": loss.item(),
+                    "loss_think": loss_think.item(),
+                    "loss_continuation": loss_continuation.item(),
+                    "grad_norm": grad_norm.item(),
+                },
+                step=batch_idx,
+                commit=True,
+            )
     else:
         print(
             f"for batch {batch_idx}: loss={loss.item():.4f} thinking_loss={loss_think.item():.4f} continuation_loss={loss_continuation.item():.4f}"
