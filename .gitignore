@@ -6,5 +6,5 @@ wheels/
 *.egg-info
 .venv
 .vscode
-
+wandb/
 teacher_traces.jsonl

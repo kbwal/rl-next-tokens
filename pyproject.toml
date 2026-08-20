@@ -9,4 +9,5 @@ dependencies = [
     "peft>=0.20.0",
     "transformers==5.14.1",
     "vllm>=0.27.1",
+    "wandb>=0.28.2",
 ]

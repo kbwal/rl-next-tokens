@@ -1,6 +1,8 @@
 import os
+from pathlib import Path
 
 os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import json
 import random
 import numpy as np
@@ -11,6 +13,8 @@ from peft import LoraConfig, get_peft_model
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
+import argparse
+import wandb
 
 
 class TeacherDataset(Dataset):
@@ -82,27 +86,48 @@ def collate_teacher_batch(batch):
     }
 
 
-SEED = 0
-R = 16
-B = 8
-LR = 3e-4
-ALPHA = 0.25  # weight given to continuation wrt thinking
+parser = argparse.ArgumentParser()
+parser.add_argument("--seed", type=int, default=0)
+parser.add_argument("--r", type=int, default=16)
+parser.add_argument("--b", type=int, default=8)
+parser.add_argument("--lr", type=float, default=3e-4)
+parser.add_argument("--alpha", type=float, default=0.25)
+parser.add_argument("--checkpoint-root", type=Path, default=Path("./sft_checkpoints"))
+parser.add_argument("--wandb", action="store_true")
+args = parser.parse_args()
+SEED = args.seed
+R = args.r
+B = args.b
+LR = args.lr
+ALPHA = args.alpha  # weight given to continuation wrt thinking
 lora_config = LoraConfig(r=R, target_modules="all-linear", lora_alpha=2 * R)
 device = "cuda:0"
+
+config = {"learning_rate": LR, "batch_size": B, "alpha": ALPHA, "rank": R, "seed": SEED}
+
+if args.wandb:
+    wandb_run = wandb.init(project="rl-ntp", name=f"sft-{R}-{LR}", config=config)
+    sweep_suffix = f"-{wandb_run.sweep_id}" if wandb_run.sweep_id else ""
+else:
+    sweep_suffix = ""
+CHECKPOINT_ROOT = Path(f"{args.checkpoint_root}{sweep_suffix}-{R}-{LR}")
 
 random.seed(SEED)
 torch.manual_seed(SEED)
 np.random.seed(SEED)
 torch.cuda.manual_seed_all(SEED)
-# torch.use_deterministic_algorithms(True)
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
 dataloader_generator = torch.Generator().manual_seed(SEED)
 
 model_name, cache_dir = "Qwen/Qwen3-1.7B-Base", "/scratch/hub"
 model = AutoModelForCausalLM.from_pretrained(
-    model_name, cache_dir=cache_dir, device_map=device, attn_implementation="sdpa"
+    model_name,
+    cache_dir=cache_dir,
+    device_map=device,
+    attn_implementation="sdpa",
 )
+model.config.use_cache = False
 model.gradient_checkpointing_enable()
 model.enable_input_require_grads()
 
@@ -152,15 +177,57 @@ for batch_idx, batch in enumerate(dataloader):
     ]
 
     loss_think = token_ce[think_targets_cut].mean()
-    loss_cont = token_ce[continuation_targets_cut].mean()
-    loss = loss_think + ALPHA * loss_cont
+    loss_continuation = token_ce[continuation_targets_cut].mean()
+    loss = loss_think + ALPHA * loss_continuation
 
     optimizer.zero_grad()
     loss.backward()
     grad_norm = torch.nn.utils.clip_grad_norm_(lora_model.parameters(), 1.0)
     optimizer.step()
 
-    if batch_idx % 1 == 0:
-        print(
-            f"for batch {batch_idx}: loss={loss.item():.4f} thinking_loss={loss_think.item():.4f} continuation_loss={loss_cont.item():.4f}"
+    if args.wandb:
+        wandb.log(
+            {
+                "loss": loss.item(),
+                "loss_think": loss_think.item(),
+                "loss_continuation": loss_continuation.item(),
+                "grad_norm": grad_norm.item(),
+            },
+            step=batch_idx,
+            commit=True,
         )
+    else:
+        print(
+            f"for batch {batch_idx}: loss={loss.item():.4f} thinking_loss={loss_think.item():.4f} continuation_loss={loss_continuation.item():.4f}"
+        )
+    if (batch_idx != 0 and batch_idx % 100 == 0) or batch_idx == len(dataloader) - 1:
+        checkpoint_dir = CHECKPOINT_ROOT / f"batch_{batch_idx}"
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        lora_model.save_pretrained(str(checkpoint_dir))
+        tokenizer.save_pretrained(str(checkpoint_dir))
+        torch.save(
+            {
+                "optimizer": optimizer.state_dict(),
+                "batch_idx": batch_idx,
+                "rng": {
+                    "python": random.getstate(),
+                    "numpy": np.random.get_state(),
+                    "torch": torch.get_rng_state(),
+                    "cuda": torch.cuda.get_rng_state_all(),
+                    "dataloader_generator": dataloader_generator.get_state(),
+                },
+                "hyperparams": {
+                    "SEED": SEED,
+                    "R": R,
+                    "B": B,
+                    "LR": LR,
+                    "ALPHA": ALPHA,
+                    "model_name": model_name,
+                },
+            },
+            checkpoint_dir / "training_state.pt",
+        )
+        print(f"saved checkpoint to {checkpoint_dir}")
+
+if args.wandb:
+    wandb.finish()

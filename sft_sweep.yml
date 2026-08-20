@@ -1,0 +1,14 @@
+program: sft_on_teacher_traces.py
+project: rl-ntp
+method: grid
+parameters:
+  lr:
+    values: [1.0e-4, 3.0e-4]
+  r:
+    values: [8, 16, 32]
+command:
+  - ${env}
+  - python
+  - ${program}
+  - --wandb
+  - ${args}
