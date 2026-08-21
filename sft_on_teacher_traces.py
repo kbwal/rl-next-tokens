@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+import shutil
 
 os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
@@ -93,6 +94,7 @@ parser.add_argument("--b", type=int, default=8)
 parser.add_argument("--lr", type=float, default=3e-4)
 parser.add_argument("--alpha", type=float, default=0.25)
 parser.add_argument("--checkpoint-root", type=Path, default=Path("."))
+parser.add_argument("--max-checkpoints", type=int, default=3)
 parser.add_argument("--wandb", action="store_true")
 args = parser.parse_args()
 SEED = args.seed
@@ -100,6 +102,7 @@ R = args.r
 B = args.b
 LR = args.lr
 ALPHA = args.alpha  # weight given to continuation wrt thinking
+MAX_CHECKPOINTS = args.max_checkpoints
 device = "cuda:0"
 model_name, cache_dir = "Qwen/Qwen3-1.7B-Base", "/scratch/hub"
 
@@ -122,7 +125,7 @@ config = {
     "seed": SEED,
 }
 
-run_name = "sft-training-think-tokens"
+run_name = "sft-removed-length-bias"
 if args.wandb:
     wandb.init(
         project="rl-ntp",
@@ -163,6 +166,8 @@ dataloader = DataLoader(
 lora_model.train()
 lora_model.print_trainable_parameters()
 
+saved_checkpoints = []
+
 for batch_idx, batch in enumerate(dataloader):
     input_ids = batch["input_ids"].to(device)
     attention_mask = batch["attention_mask"].to(device)
@@ -185,18 +190,19 @@ for batch_idx, batch in enumerate(dataloader):
         reduction="none",
     )
 
-    think_targets_cut = think_targets[think_targets | continuation_targets]
-    continuation_targets_cut = continuation_targets[
-        think_targets | continuation_targets
-    ]
-
-    loss_think = token_ce[think_targets_cut].mean()
-    loss_continuation = token_ce[continuation_targets_cut].mean()
+    ce_grid = token_ce.new_zeros(think_targets.shape)
+    ce_grid[think_targets | continuation_targets] = token_ce
+    think_counts = think_targets.sum(dim=1).to(dtype=token_ce.dtype)
+    loss_think = (ce_grid * think_targets).sum(dim=1).div(think_counts).mean()
+    continuation_counts = continuation_targets.sum(dim=1).to(dtype=token_ce.dtype)
+    loss_continuation = (
+        (ce_grid * continuation_targets).sum(dim=1).div(continuation_counts).mean()
+    )
     loss = loss_think + ALPHA * loss_continuation
 
     optimizer.zero_grad()
     loss.backward()
-    grad_norm = torch.nn.utils.clip_grad_norm_(lora_model.parameters(), 1.0)
+    grad_norm = torch.nn.utils.clip_grad_norm_(lora_model.parameters(), 2.5)
     optimizer.step()
 
     if args.wandb:
@@ -243,6 +249,11 @@ for batch_idx, batch in enumerate(dataloader):
             checkpoint_dir / "training_state.pt",
         )
         print(f"saved checkpoint to {checkpoint_dir}")
+        saved_checkpoints.append(checkpoint_dir)
+        if MAX_CHECKPOINTS > 0 and len(saved_checkpoints) > MAX_CHECKPOINTS:
+            oldest_checkpoint = saved_checkpoints.pop(0)
+            if oldest_checkpoint.exists():
+                shutil.rmtree(oldest_checkpoint)
 
 if args.wandb:
     wandb.finish()

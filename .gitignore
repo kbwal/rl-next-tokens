@@ -8,3 +8,4 @@ wheels/
 .vscode
 wandb/
 teacher_traces.jsonl
+sft-training-think-tokens-checkpoints
