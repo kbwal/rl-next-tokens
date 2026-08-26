@@ -6,10 +6,8 @@ import argparse
 from pathlib import Path
 import random
 import numpy as np
-from typing import cast
 import torch
 import torch.nn.functional as F
-from peft import PeftModel
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
@@ -18,7 +16,16 @@ from transformers import (
 )
 from trl.trainer.grpo_trainer import GRPOTrainer
 from trl.trainer.grpo_config import GRPOConfig
-from load_data import create_grpo_dataset, create_grpo_overfit_dataset
+from load_data import create_grpo_base_overfit_dataset_full
+
+RLP_INSTRUCTION = (
+    "You are a continuation-and-reasoning assistant. You receive the prefix of a "
+    "context, problem, solution, or derivation. First, briefly think between "
+    "<think> and </think> about what should come next. Then, after </think>, "
+    "continue the text in the SAME style as the prefix (notation, LaTeX, tone), "
+    "focusing on the next few steps rather than jumping to a final boxed answer. "
+    "Do not restate the question or add meta commentary; simply continue the content."
+)
 
 
 class ThinkReward:
@@ -27,12 +34,10 @@ class ThinkReward:
         model: PreTrainedModel,
         tokenizer: PreTrainedTokenizerBase,
         alpha: float,
-        format_penalty: float,
     ):
         self.model = model
         self.tokenizer = tokenizer
         self.alpha = alpha
-        self.format_penalty = format_penalty
 
     def __call__(
         self,
@@ -65,24 +70,6 @@ class ThinkReward:
             dtype=torch.float32,
         )
 
-        format_penalties = []
-        for c in completions:
-            has_open = "<think>" in c
-            has_close = "</think>" in c
-            if not has_open or not has_close:
-                format_penalties.append(self.format_penalty)
-            else:
-                open_idx = c.find("<think>")
-                close_idx = c.rfind("</think>")
-                if open_idx >= close_idx:
-                    format_penalties.append(self.format_penalty)
-                else:
-                    format_penalties.append(0.0)
-
-        format_penalties_tensor = torch.tensor(
-            format_penalties, device=self.model.device, dtype=torch.float32
-        )
-
         # note: this only works if the lengths of the continuations are the same
         # otherwise it won't, and it just cuts off to the min
         length_of_continuation = (full_len - prefix_len).min().item()
@@ -106,9 +93,7 @@ class ThinkReward:
             labels = torch.gather(full_ids, 1, shift_logit_indexes + 1)
             token_log_probs = log_probs.gather(2, labels.unsqueeze(-1)).squeeze(-1)
             sequence_log_probs = token_log_probs.mean(dim=-1)
-            total_rewards = (
-                sequence_log_probs - self.alpha * thinking_len - format_penalties_tensor
-            )
+            total_rewards = sequence_log_probs - self.alpha * thinking_len
             rewards.extend(total_rewards.tolist())
 
         if was_training:
@@ -117,14 +102,13 @@ class ThinkReward:
         return rewards  # type: ignore
 
 
-run_name = "grpo-overfitting"
+run_name = "grpo-base-overfitting"
 parser = argparse.ArgumentParser()
 parser.add_argument("--seed", type=int, default=0)
 parser.add_argument("--g", type=int, default=8)
 parser.add_argument("--b", type=int, default=8)
 parser.add_argument("--lr", type=float, default=1e-6)
-parser.add_argument("--alpha", type=float, default=0.0005)
-parser.add_argument("--format-penalty", type=float, default=3.0)
+parser.add_argument("--alpha", type=float, default=0.0)
 parser.add_argument("--min-prefix-len", type=int, default=128)
 parser.add_argument("--max-prefix-len", type=int, default=2048)
 parser.add_argument("--continuation-length", type=int, default=16)
@@ -137,7 +121,6 @@ G = args.g
 B = args.b
 LR = args.lr
 ALPHA = args.alpha
-FORMAT_PENALTY = args.format_penalty
 MAX_CHECKPOINTS = args.max_checkpoints
 CHECKPOINT_ROOT = Path(f"./grpo-checkpoints") / f"{run_name}-checkpoints"
 local_rank = int(os.environ.get("LOCAL_RANK", 0))
@@ -145,9 +128,6 @@ device = f"cuda:{local_rank}"
 torch.cuda.set_device(device)
 device_map = {"": device}
 model_name, cache_dir = "Qwen/Qwen3-1.7B-Base", "/scratch/hub"
-adapter_path = (
-    "/home/kushalb/rl-ntp/sft-removed-length-bias-checkpoints/run-8-0.0001/batch_1096"
-)
 
 tokenizer = AutoTokenizer.from_pretrained(model_name, cache_dir=cache_dir)
 tokenizer.padding_side = "right"
@@ -161,21 +141,16 @@ torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
 dataloader_generator = torch.Generator().manual_seed(SEED)
 
-base_model = AutoModelForCausalLM.from_pretrained(
+model = AutoModelForCausalLM.from_pretrained(
     model_name,
     cache_dir=cache_dir,
     device_map=device_map,
     attn_implementation="sdpa",
 )
-base_model.config.use_cache = False
-base_model.config.pad_token_id = tokenizer.pad_token_id
-base_model.gradient_checkpointing_enable()
-base_model.enable_input_require_grads()
-model = PeftModel.from_pretrained(base_model, adapter_path, is_trainable=True)
-model = model.merge_and_unload()  # type: ignore
-model = cast(PreTrainedModel, model)
-for p in model.parameters():
-    p.requires_grad = True
+model.config.use_cache = False
+model.config.pad_token_id = tokenizer.pad_token_id
+model.gradient_checkpointing_enable()
+model.enable_input_require_grads()
 
 closethink_id = tokenizer.convert_tokens_to_ids("</think>")
 grpo_config = GRPOConfig(
@@ -185,12 +160,12 @@ grpo_config = GRPOConfig(
     per_device_train_batch_size=G,
     gradient_accumulation_steps=B,
     steps_per_generation=1,
-    max_completion_length=200,
+    max_completion_length=512,
     temperature=1.0,
     learning_rate=LR,
     optim="paged_adamw_8bit",
     num_iterations=1,
-    generation_kwargs={"eos_token_id": [tokenizer.eos_token_id, closethink_id]},
+    generation_kwargs={"stop_token_ids": [tokenizer.eos_token_id, closethink_id]},
     seed=SEED,
     bf16=True,
     lr_scheduler_type="cosine",
@@ -203,23 +178,27 @@ grpo_config = GRPOConfig(
     save_total_limit=MAX_CHECKPOINTS,
     report_to="wandb" if args.wandb else "none",
     num_train_epochs=100,
+    use_vllm=True,
+    vllm_gpu_memory_utilization=0.3,
+    vllm_max_model_length=2560,
+    vllm_enable_sleep_mode=True,
+    vllm_importance_sampling_correction=False,
+    use_liger_kernel=True,
 )
 
-train_dataset = create_grpo_overfit_dataset(
+train_dataset = create_grpo_base_overfit_dataset_full(
     tokenizer=tokenizer,
     samples_per_doc=1,
     min_prefix_len=args.min_prefix_len,
     max_prefix_len=args.max_prefix_len,
     continuation_length=args.continuation_length,
-    dataset_path="/scratch/datasets/openwebmath_600k",
     seed=SEED,
+    instruction=RLP_INSTRUCTION,
 )
 
 trainer = GRPOTrainer(
     model=model,
-    reward_funcs=ThinkReward(
-        model, tokenizer, alpha=ALPHA, format_penalty=FORMAT_PENALTY
-    ),
+    reward_funcs=ThinkReward(model, tokenizer, alpha=ALPHA),
     args=grpo_config,
     train_dataset=train_dataset,
 )
