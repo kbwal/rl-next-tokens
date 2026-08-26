@@ -33,22 +33,47 @@ class TeacherDataset(Dataset):
 
     def __getitem__(self, idx):
         item = self.data[idx]
-        return item["prefix"], item["teacher_thinking_trace"], item["continuation"]
+        return (
+            item["prefix"],
+            item["teacher_thinking_trace"],
+            item["continuation"],
+            item.get("prefix_ids"),
+            item.get("teacher_thinking_trace_ids"),
+            item.get("continuation_ids"),
+        )
+
+
+def ids_or_tokenize(texts, stored_ids):
+    return [
+        (
+            [int(t) for t in ids]
+            if ids is not None
+            else tokenizer(text, add_special_tokens=False)["input_ids"]
+        )
+        for text, ids in zip(texts, stored_ids)
+    ]
 
 
 def collate_teacher_batch(batch):
-    prefixes, thoughts, continuations = zip(*batch)
-    prefix_ids = tokenizer(list(prefixes), add_special_tokens=False)["input_ids"]
-    thought_ids = tokenizer(list(thoughts), add_special_tokens=False)["input_ids"]
-    continuation_ids = tokenizer(list(continuations), add_special_tokens=False)[
-        "input_ids"
-    ]
+    (
+        prefixes,
+        thoughts,
+        continuations,
+        prefix_ids,
+        thought_ids,
+        continuation_ids,
+    ) = zip(*batch)
+    prefix_ids = ids_or_tokenize(prefixes, prefix_ids)
+    thought_ids = ids_or_tokenize(thoughts, thought_ids)
+    continuation_ids = ids_or_tokenize(continuations, continuation_ids)
 
     input_rows = []
     attention_rows = []
     think_rows = []
     continuation_rows = []
-    for prefix, thought, continuation in zip(prefix_ids, thought_ids, continuation_ids):
+    for prefix, thought, continuation in zip(
+        prefix_ids, thought_ids, continuation_ids
+    ):
         input_rows.append(
             torch.tensor(prefix + thought + continuation, dtype=torch.long)
         )

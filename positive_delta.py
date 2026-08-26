@@ -11,6 +11,7 @@ import torch
 import torch.nn.functional as F
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from vllm import LLM, SamplingParams
+from vllm.inputs import TokensPrompt
 from datasets import load_from_disk
 
 
@@ -40,28 +41,28 @@ def parse_args():
 
 @torch.no_grad()
 def score_continuation_batch(
-    model, tokenizer, prefixes: list[str], continuations: list[str], device: str
+    model, tokenizer, prefix_ids: list[list[int]], cont_ids: list[list[int]], device: str
 ) -> list[float]:
-    full_texts = [p + c for p, c in zip(prefixes, continuations)]
+    prefix_ids = [[int(t) for t in p] for p in prefix_ids]
+    cont_ids = [[int(t) for t in c] for c in cont_ids]
+    full_seq_ids = [p + c for p, c in zip(prefix_ids, cont_ids)]
+    full_enc = tokenizer.pad(
+        {"input_ids": full_seq_ids}, return_tensors="pt", padding=True
+    )
 
-    prefix_enc = tokenizer(prefixes, return_tensors="pt", padding=True)
-    full_enc = tokenizer(full_texts, return_tensors="pt", padding=True)
-
-    prefix_ids = prefix_enc["input_ids"].to(device)
     full_ids = full_enc["input_ids"].to(device)
     attention_mask = full_enc["attention_mask"].to(device)
 
-    prefix_lens = (prefix_ids != tokenizer.pad_token_id).sum(dim=1)
-    full_lens = (full_ids != tokenizer.pad_token_id).sum(dim=1)
-    cont_lens = full_lens - prefix_lens
-    min_cont_len = cont_lens.min().item()
+    prefix_lens = torch.tensor([len(p) for p in prefix_ids], device=device)
+    # Continuation length is fixed by dataset construction.
+    continuation_len = len(cont_ids[0])
 
     last_hidden = model.model(
         input_ids=full_ids, attention_mask=attention_mask
     ).last_hidden_state
 
     shift_logit_indexes = (prefix_lens - 1).unsqueeze(1) + torch.arange(
-        min_cont_len, device=device
+        continuation_len, device=device
     ).unsqueeze(0)
     continuation_hidden = torch.gather(
         last_hidden,
@@ -88,9 +89,11 @@ def get_batch_pairs(
     max_prefix_len: int,
     continuation_len: int,
     generator: torch.Generator,
-) -> tuple[list[str], list[str]]:
+) -> tuple[list[str], list[str], list[list[int]], list[list[int]]]:
     prefixes = []
     continuations = []
+    all_prefix_ids = []
+    all_cont_ids = []
 
     end_idx = min(starting_idx + batch_size, len(raw_data))
     for i in range(starting_idx, end_idx):
@@ -114,8 +117,10 @@ def get_batch_pairs(
 
         prefixes.append(tokenizer.decode(prefix_ids))
         continuations.append(tokenizer.decode(cont_ids))
+        all_prefix_ids.append([int(t) for t in prefix_ids])
+        all_cont_ids.append([int(t) for t in cont_ids])
 
-    return prefixes, continuations
+    return prefixes, continuations, all_prefix_ids, all_cont_ids
 
 
 def main():
@@ -183,7 +188,12 @@ def main():
     start_time = time.time()
 
     for start_idx in range(0, total_docs, args.batch_size):
-        batch_prefixes, batch_continuations = get_batch_pairs(
+        (
+            batch_prefixes,
+            batch_continuations,
+            batch_prefix_ids,
+            batch_cont_ids,
+        ) = get_batch_pairs(
             raw_data=raw_data,
             starting_idx=start_idx,
             batch_size=args.batch_size,
@@ -197,31 +207,47 @@ def main():
             continue
 
         logp_nothink_list = score_continuation_batch(
-            base_scorer, tokenizer, batch_prefixes, batch_continuations, args.base_score_device
+            base_scorer,
+            tokenizer,
+            batch_prefix_ids,
+            batch_cont_ids,
+            args.base_score_device,
         )
 
-        vllm_outputs = llm.generate(batch_prefixes, sampling_params)
+        token_prompts = [
+            TokensPrompt(prompt_token_ids=ids) for ids in batch_prefix_ids
+        ]
+        vllm_outputs = llm.generate(token_prompts, sampling_params)
 
-        all_candidate_prefixes = []
-        all_candidate_conts = []
-        for prefix, cont, out in zip(batch_prefixes, batch_continuations, vllm_outputs):
+        all_candidate_prefix_ids = []
+        all_candidate_cont_ids = []
+        for p_ids, c_ids, out in zip(
+            batch_prefix_ids, batch_cont_ids, vllm_outputs
+        ):
+            generated_prompt_ids = [int(t) for t in out.prompt_token_ids]
             for sample in out.outputs:
-                all_candidate_prefixes.append(prefix + sample.text)
-                all_candidate_conts.append(cont)
+                think_ids = [int(t) for t in sample.token_ids]
+                all_candidate_prefix_ids.append(generated_prompt_ids + think_ids)
+                all_candidate_cont_ids.append(c_ids)
 
         logp_think_list = []
         score_chunk_size = 8
-        for i in range(0, len(all_candidate_prefixes), score_chunk_size):
-            chunk_p = all_candidate_prefixes[i : i + score_chunk_size]
-            chunk_c = all_candidate_conts[i : i + score_chunk_size]
+        for i in range(0, len(all_candidate_prefix_ids), score_chunk_size):
+            chunk_p = all_candidate_prefix_ids[i : i + score_chunk_size]
+            chunk_c = all_candidate_cont_ids[i : i + score_chunk_size]
             chunk_lps = score_continuation_batch(
                 sft_scorer, tokenizer, chunk_p, chunk_c, args.sft_score_device
             )
             logp_think_list.extend(chunk_lps)
 
         think_idx = 0
-        for prefix, cont, out, lp_nothink in zip(
-            batch_prefixes, batch_continuations, vllm_outputs, logp_nothink_list
+        for prefix, prefix_ids, cont, cont_ids, out, lp_nothink in zip(
+            batch_prefixes,
+            batch_prefix_ids,
+            batch_continuations,
+            batch_cont_ids,
+            vllm_outputs,
+            logp_nothink_list,
         ):
             doc_candidates = []
             for sample in out.outputs:
@@ -231,11 +257,14 @@ def main():
                 delta = lp_think - lp_nothink
                 all_deltas.append(delta)
 
-                thought = sample.text.strip()
+                thought = sample.text
                 if "<think>" in thought and "</think>" in thought:
                     inner = thought.split("<think>")[1].split("</think>")[0].strip()
                     if (len(inner) > 0 or args.allow_empty_thinks) and delta >= args.min_delta:
-                        doc_candidates.append((delta, thought, lp_think, lp_nothink))
+                        think_ids = [int(t) for t in sample.token_ids]
+                        doc_candidates.append(
+                            (delta, thought, think_ids, lp_think, lp_nothink)
+                        )
 
             doc_candidates.sort(key=lambda x: x[0], reverse=True)
             if args.keep_top_k > 0:
@@ -243,11 +272,14 @@ def main():
 
             if doc_candidates:
                 prefixes_with_positive += 1
-                for d, t, lp_t, lp_nt in doc_candidates:
+                for d, t, think_ids, lp_t, lp_nt in doc_candidates:
                     entry = {
                         "prefix": prefix,
+                        "prefix_ids": [int(t) for t in prefix_ids],
                         "teacher_thinking_trace": t,
+                        "teacher_thinking_trace_ids": think_ids,
                         "continuation": cont,
+                        "continuation_ids": [int(t) for t in cont_ids],
                         "delta": round(d, 4),
                         "logp_think": round(lp_t, 4),
                         "logp_nothink": round(lp_nt, 4),

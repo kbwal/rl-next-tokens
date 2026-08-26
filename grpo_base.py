@@ -45,25 +45,35 @@ class ThinkReward:
         completions: list[str],
         completion_ids: list[list[int]],
         continuations: list[str],
+        continuation_ids: list[list[int]],
         **kwargs,
     ) -> list[float | None]:
         rewards: list[float] = []
         was_training = self.model.training
         self.model.eval()
-        full_prefix = [prompts[i] + completions[i] for i in range(len(prompts))]
-        full_text = [
-            prompts[i] + completions[i] + continuations[i] for i in range(len(prompts))
+        # Match GRPOTrainer._tokenize_prompts exactly. The prompt text is decoded
+        # dataset text, so stored pre-decode IDs are not necessarily the IDs used
+        # to generate completion_ids.
+        prompt_ids = self.tokenizer(prompts)["input_ids"]
+        prompt_ids = [[int(t) for t in p] for p in prompt_ids]
+        completion_ids = [[int(t) for t in c] for c in completion_ids]
+        cont_ids = [[int(t) for t in c] for c in continuation_ids]
+        full_seq_ids = [
+            p + c + cont
+            for p, c, cont in zip(prompt_ids, completion_ids, cont_ids)
         ]
-        prefix_ids = self.tokenizer(full_prefix, return_tensors="pt", padding=True)[
-            "input_ids"
-        ].to(self.model.device)
-        full_enc = self.tokenizer(full_text, return_tensors="pt", padding=True)
+        full_enc = self.tokenizer.pad(
+            {"input_ids": full_seq_ids}, return_tensors="pt", padding=True
+        )
         full_ids = full_enc["input_ids"].to(self.model.device)
         attention_mask = full_enc["attention_mask"].to(self.model.device)
-        prefix_len = torch.where(prefix_ids != self.tokenizer.pad_token_id, 1, 0).sum(
-            dim=1
+        prefix_len = torch.tensor(
+            [
+                len(p) + len(c)
+                for p, c in zip(prompt_ids, completion_ids)
+            ],
+            device=self.model.device,
         )
-        full_len = torch.where(full_ids != self.tokenizer.pad_token_id, 1, 0).sum(dim=1)
         thinking_len = torch.tensor(
             [len(c) for c in completion_ids],
             device=self.model.device,
@@ -72,7 +82,7 @@ class ThinkReward:
 
         # note: this only works if the lengths of the continuations are the same
         # otherwise it won't, and it just cuts off to the min
-        length_of_continuation = (full_len - prefix_len).min().item()
+        length_of_continuation = min(len(c) for c in cont_ids)
 
         with torch.no_grad():
             last_hidden = self.model.model(
@@ -172,7 +182,7 @@ grpo_config = GRPOConfig(
     # max_steps=args.max_steps,
     # warmup_steps=int(0.05 * args.max_steps),
     warmup_ratio=0.05,
-    logging_steps=5,
+    logging_steps=1,
     save_strategy="steps",
     save_steps=100,
     save_total_limit=MAX_CHECKPOINTS,
@@ -180,7 +190,7 @@ grpo_config = GRPOConfig(
     num_train_epochs=100,
     use_vllm=True,
     vllm_gpu_memory_utilization=0.3,
-    vllm_max_model_length=2560,
+    vllm_max_model_length=3300,
     vllm_enable_sleep_mode=True,
     vllm_importance_sampling_correction=False,
     use_liger_kernel=True,
@@ -198,6 +208,7 @@ train_dataset = create_grpo_base_overfit_dataset_full(
 
 trainer = GRPOTrainer(
     model=model,
+    processing_class=tokenizer,
     reward_funcs=ThinkReward(model, tokenizer, alpha=ALPHA),
     args=grpo_config,
     train_dataset=train_dataset,

@@ -1,13 +1,49 @@
-from typing import Any, cast
+from typing import Any
 from datasets import Dataset, IterableDataset, load_dataset, load_from_disk
 import torch
-from torch.nn.utils.rnn import pad_sequence
 
 FORCE_OPEN_THINK_TAG = "<think>"
 
 
 def format_grpo_base_prompt(prefix: str, instruction: str) -> str:
     return instruction.strip() + "\n\n" + prefix
+
+
+def _int_ids(ids) -> list[int]:
+    return [int(t) for t in ids]
+
+
+def _decode_exact(tokenizer, token_ids) -> str | None:
+    token_ids = _int_ids(token_ids)
+    text = tokenizer.decode(token_ids)
+    reencoded = tokenizer(text, add_special_tokens=False)["input_ids"]
+    return text if _int_ids(reencoded) == token_ids else None
+
+
+def _grpo_row(
+    tokenizer,
+    prefix_ids,
+    continuation_ids,
+    *,
+    instruction: str | None = None,
+) -> dict | None:
+    prefix_ids = _int_ids(prefix_ids)
+    continuation_ids = _int_ids(continuation_ids)
+    prefix = _decode_exact(tokenizer, prefix_ids)
+    if prefix is None:
+        return None
+    row = {
+        "prompt": (
+            format_grpo_base_prompt(prefix, instruction)
+            if instruction is not None
+            else prefix
+        ),
+        "continuations": tokenizer.decode(continuation_ids),
+        "continuation_ids": continuation_ids,
+    }
+    if instruction is not None:
+        row["raw_prefix"] = prefix
+    return row
 
 
 def create_grpo_dataset(
@@ -44,10 +80,9 @@ def create_grpo_dataset(
                 continuation_ids = token_ids[
                     split_point : split_point + continuation_length
                 ]
-                yield {
-                    "prompt": tokenizer.decode(prefix_ids),
-                    "continuations": tokenizer.decode(continuation_ids),
-                }
+                row = _grpo_row(tokenizer, prefix_ids, continuation_ids)
+                if row is not None:
+                    yield row
 
     return IterableDataset.from_generator(gen)
 
@@ -87,12 +122,10 @@ def create_grpo_overfit_dataset(
             continuation_ids = token_ids[
                 split_point : split_point + continuation_length
             ]
-            samples.append(
-                {
-                    "prompt": tokenizer.decode(prefix_ids),
-                    "continuations": tokenizer.decode(continuation_ids),
-                }
-            )
+            row = _grpo_row(tokenizer, prefix_ids, continuation_ids)
+            if row is None:
+                continue
+            samples.append(row)
             if len(samples) >= num_samples:
                 break
         if len(samples) >= num_samples:
@@ -136,12 +169,14 @@ def create_grpo_base_dataset(
                 continuation_ids = token_ids[
                     split_point : split_point + continuation_length
                 ]
-                prefix = tokenizer.decode(prefix_ids)
-                yield {
-                    "prompt": format_grpo_base_prompt(prefix, instruction),
-                    "continuations": tokenizer.decode(continuation_ids),
-                    "raw_prefix": prefix,
-                }
+                row = _grpo_row(
+                    tokenizer,
+                    prefix_ids,
+                    continuation_ids,
+                    instruction=instruction,
+                )
+                if row is not None:
+                    yield row
 
     return IterableDataset.from_generator(gen)
 
@@ -182,14 +217,15 @@ def create_grpo_base_overfit_dataset(
             continuation_ids = token_ids[
                 split_point : split_point + continuation_length
             ]
-            prefix = tokenizer.decode(prefix_ids)
-            samples.append(
-                {
-                    "prompt": format_grpo_base_prompt(prefix, instruction),
-                    "continuations": tokenizer.decode(continuation_ids),
-                    "raw_prefix": prefix,
-                }
+            row = _grpo_row(
+                tokenizer,
+                prefix_ids,
+                continuation_ids,
+                instruction=instruction,
             )
+            if row is None:
+                continue
+            samples.append(row)
             if len(samples) >= num_samples:
                 break
         if len(samples) >= num_samples:
@@ -241,12 +277,14 @@ def create_grpo_base_dataset_full(
                 continuation_ids = token_ids[
                     split_point : split_point + continuation_length
                 ]
-                prefix = tokenizer.decode(prefix_ids)
-                yield {
-                    "prompt": format_grpo_base_prompt(prefix, instruction),
-                    "continuations": tokenizer.decode(continuation_ids),
-                    "raw_prefix": prefix,
-                }
+                row = _grpo_row(
+                    tokenizer,
+                    prefix_ids,
+                    continuation_ids,
+                    instruction=instruction,
+                )
+                if row is not None:
+                    yield row
 
     return IterableDataset.from_generator(gen)
 
@@ -295,14 +333,15 @@ def create_grpo_base_overfit_dataset_full(
             continuation_ids = token_ids[
                 split_point : split_point + continuation_length
             ]
-            prefix = tokenizer.decode(prefix_ids)
-            samples.append(
-                {
-                    "prompt": format_grpo_base_prompt(prefix, instruction),
-                    "continuations": tokenizer.decode(continuation_ids),
-                    "raw_prefix": prefix,
-                }
+            row = _grpo_row(
+                tokenizer,
+                prefix_ids,
+                continuation_ids,
+                instruction=instruction,
             )
+            if row is None:
+                continue
+            samples.append(row)
             if len(samples) >= num_samples:
                 break
         if len(samples) >= num_samples:
@@ -344,17 +383,17 @@ class TrainingDataset:
         min_prefix_len: int,
         continuation_length: int,
         max_prefix_len: int,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[list[list[int]], list[list[int]]]:
         docs = self.get_document_batch(
             starting_doc_index=starting_doc_index, num_docs=num_docs
         )
-        tokenized_docs = self.tokenizer(docs)["input_ids"]
+        tokenized_docs = self.tokenizer(docs, add_special_tokens=False)["input_ids"]
         all_prefixes = []
         all_continuations = []
 
         for tokenized_doc in tokenized_docs:
-            token_ids = torch.tensor(tokenized_doc, dtype=torch.long)
-            n = token_ids.shape[0]
+            token_ids = _int_ids(tokenized_doc)
+            n = len(token_ids)
             max_split_point = min(n - continuation_length, max_prefix_len)
 
             if max_split_point <= min_prefix_len + 1:
@@ -367,16 +406,13 @@ class TrainingDataset:
                 max_split_point,
                 (num_samples_per_doc,),
                 generator=self.generator,
-            )
+            ).tolist()
             for split_point in split_points:
-                all_prefixes.append(token_ids[:split_point])
+                prefix_ids = token_ids[:split_point]
+                if _decode_exact(self.tokenizer, prefix_ids) is None:
+                    continue
+                all_prefixes.append(prefix_ids)
                 all_continuations.append(
                     token_ids[split_point : split_point + continuation_length]
                 )
-        prefixes = pad_sequence(
-            all_prefixes,
-            batch_first=True,
-            padding_value=self.tokenizer.pad_token_id,
-        )
-        continuations = torch.stack(all_continuations)
-        return prefixes, continuations
+        return all_prefixes, all_continuations

@@ -10,6 +10,9 @@ import random
 def main():
     teacher_model_path = "/scratch/hub/gemma4_31b/models--Intel--gemma-4-31B-it-int4-AutoRound/snapshots/a428c96a57976947b0f12735f0cf5fcae69019ad"
     tokenizer = AutoTokenizer.from_pretrained(teacher_model_path)
+    student_tokenizer = AutoTokenizer.from_pretrained(
+        "Qwen/Qwen3-1.7B-Base", cache_dir="/scratch/hub"
+    )
 
     max_model_len = 8192
     max_tokens = 2048
@@ -53,7 +56,9 @@ Predict at least a few sentences of the document continuation (all documents giv
         include_stop_str_in_output=True,
     )
 
-    training_dataset = TrainingDataset(tokenizer)
+    # Slice documents in the student's vocabulary so the saved IDs can be used
+    # directly during SFT without a lossy decode/re-tokenize round trip.
+    training_dataset = TrainingDataset(student_tokenizer)
     mode_rng = random.Random(0)
 
     with open(filename, "a", encoding="utf-8") as f:
@@ -69,37 +74,41 @@ Predict at least a few sentences of the document continuation (all documents giv
                     max_prefix_len=max_prefix_len,
                 )
             )
-            unformatted_prompts = tokenizer.batch_decode(
-                tokenized_prefixes, skip_special_tokens=True
-            )
-            continuations = tokenizer.batch_decode(tokenized_continuations)
+            unformatted_prompts = student_tokenizer.batch_decode(tokenized_prefixes)
+            continuations = student_tokenizer.batch_decode(tokenized_continuations)
 
             thinking_modes = mode_rng.choices(
                 ["nothink", "default", "few_words", "couple_sentences"],
                 weights=[0.025, 0.225, 0.375, 0.375],
                 k=len(unformatted_prompts),
             )
-            generated_prompt_indices = [
-                prompt_idx
-                for prompt_idx, mode in enumerate(thinking_modes)
-                if mode != "nothink"
-            ]
-            prompts = [
-                tokenizer.apply_chat_template(
-                    [
-                        {
-                            "role": "system",
-                            "content": system_prompt
-                            + mode_prompts[thinking_modes[prompt_idx]],
-                        },
-                        {"role": "user", "content": unformatted_prompts[prompt_idx]},
-                    ],
-                    tokenize=False,
-                    add_generation_prompt=True,
+            generated_prompt_indices = []
+            prompts = []
+            for prompt_idx, mode in enumerate(thinking_modes):
+                if mode == "nothink":
+                    continue
+                prompt = (
+                    tokenizer.apply_chat_template(
+                        [
+                            {
+                                "role": "system",
+                                "content": system_prompt + mode_prompts[mode],
+                            },
+                            {
+                                "role": "user",
+                                "content": unformatted_prompts[prompt_idx],
+                            },
+                        ],
+                        tokenize=False,
+                        add_generation_prompt=True,
+                    )
+                    + prepended_think_tag
                 )
-                + prepended_think_tag
-                for prompt_idx in generated_prompt_indices
-            ]
+                prompt_length = len(tokenizer(prompt)["input_ids"])
+                if prompt_length + max_tokens > max_model_len:
+                    continue
+                generated_prompt_indices.append(prompt_idx)
+                prompts.append(prompt)
             outputs = teacher.generate(prompts, sampling_params) if prompts else []
             outputs_by_prompt_idx = dict(zip(generated_prompt_indices, outputs))
 
@@ -107,6 +116,8 @@ Predict at least a few sentences of the document continuation (all documents giv
                 if mode == "nothink":
                     trajectory_texts = ["<think></think>"]
                 else:
+                    if prompt_idx not in outputs_by_prompt_idx:
+                        continue
                     trajectory_texts = [
                         prepended_think_tag + request_output.text
                         for request_output in outputs_by_prompt_idx[prompt_idx].outputs
@@ -124,8 +135,14 @@ Predict at least a few sentences of the document continuation (all documents giv
                         json.dumps(
                             {
                                 "prefix": unformatted_prompts[prompt_idx],
+                                "prefix_ids": [
+                                    int(t) for t in tokenized_prefixes[prompt_idx]
+                                ],
                                 "teacher_thinking_trace": trajectory_text,
                                 "continuation": continuations[prompt_idx],
+                                "continuation_ids": [
+                                    int(t) for t in tokenized_continuations[prompt_idx]
+                                ],
                                 "thinking_mode": mode,
                             }
                         )
