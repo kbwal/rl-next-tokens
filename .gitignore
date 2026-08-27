@@ -7,7 +7,7 @@ wheels/
 .venv
 .vscode
 wandb/
-teacher_traces.jsonl
+teacher_traces*.jsonl
 sft-training-think-tokens-checkpoints
 sft-removed-length-bias-checkpoints
 grpo-checkpoints

@@ -4,7 +4,6 @@ from load_data import TrainingDataset
 import gc
 import json
 import os
-import random
 
 
 def main():
@@ -18,24 +17,19 @@ def main():
     max_tokens = 2048
     prepended_think_tag = "<think>"
     system_prompt = """
-You are a text predictor whose entire goal is to produce the correct continuation of a given document.
-Before doing so, you are allowed to produce thinking to help you inside <think>thinking text here to help you sound out loud</think> (though this is not mandatory, if you feel it won't help your predictions then just produce <think></think>prediction here, i.e. close the tag instantly).
-After your thinking is done, you will predict the correct continuation of the document, and your predictions should be as accurate as possible, as they will be scored. Any text produced as your internal reasoning will not be assessed, so use it as your scratchpad if you feel it will help (you may find it helpful to do a sort of step-by-step and logical reasoning).
-Predict at least a few sentences of the document continuation (all documents given to you will have at least a few sentences to predict afterwards). Remember that any text you produce after the closing think tag will be assessed, and if you forget to close it, your prediction wont count; i.e. remember to close it!
+Your goal is to produce thinking traces that would help someone go from the prefix to the continuation WITHOUT having seen the continuation and only having seen the prefix.
+You will be given document prefixes and the true continuation, and your job is to produce these thinking traces, in between <think> and </think>.
+Note: your job is to do this for someone who has NOT seen the actual continuation, ergo you should not mention that you know / have seen the true continuation.
+Your reasoning should serve as a strong bridge, such that someone who has seen the prefix and your thinking should have a good chance at predicting what comes next without having seen it.
+Do NOT just mention that you know the true continuation, instead you should be using it as a hint to guide you into better reasoning, not as a final answer.
+Feel free to think as long as you'd like, but be specific and to the point. Your thinking should include drafts of a few potential continuations. No rambling about meta-commentary or useless things. It is okay if your thinking is highly information dense.
 """
-    mode_prompts = {
-        "default": "",
-        "few_words": "\nYou only have a few words (roughly a medium length sentence) to think, past which you will be penalized, so keep your reasoning short and include only the main key ideas.",
-        "couple_sentences": "\nYou only have a couple of sentences (roughly 3-4 sentences) to think, past which you will be penalized, so keep your reasoning concise.",
-    }
     system_prompt_len = len(tokenizer.encode(system_prompt))
-    max_prefix_len = (
-        max_model_len - max_tokens - system_prompt_len - 256
-    )  # jic, accounts for mode_prompts
-    filename = "./teacher_traces.jsonl"
-    total_num_docs = 5_000
+    max_prefix_len = max_model_len - max_tokens - system_prompt_len - 256  # jic buffer
+    filename = f"./teacher_traces_new.jsonl"
+    total_num_docs = 5000
     B = 100
-    num_samples_per_doc = 2
+    num_samples_per_doc = 1
     min_prefix_len = 128
     continuation_length = 64
 
@@ -59,7 +53,6 @@ Predict at least a few sentences of the document continuation (all documents giv
     # Slice documents in the student's vocabulary so the saved IDs can be used
     # directly during SFT without a lossy decode/re-tokenize round trip.
     training_dataset = TrainingDataset(student_tokenizer)
-    mode_rng = random.Random(0)
 
     with open(filename, "a", encoding="utf-8") as f:
         for starting_doc_index in range(0, total_num_docs, B):
@@ -77,26 +70,19 @@ Predict at least a few sentences of the document continuation (all documents giv
             unformatted_prompts = student_tokenizer.batch_decode(tokenized_prefixes)
             continuations = student_tokenizer.batch_decode(tokenized_continuations)
 
-            thinking_modes = mode_rng.choices(
-                ["nothink", "default", "few_words", "couple_sentences"],
-                weights=[0.025, 0.225, 0.375, 0.375],
-                k=len(unformatted_prompts),
-            )
             generated_prompt_indices = []
             prompts = []
-            for prompt_idx, mode in enumerate(thinking_modes):
-                if mode == "nothink":
-                    continue
+            for prompt_idx, unformatted_prompt in enumerate(unformatted_prompts):
                 prompt = (
                     tokenizer.apply_chat_template(
                         [
                             {
                                 "role": "system",
-                                "content": system_prompt + mode_prompts[mode],
+                                "content": system_prompt,
                             },
                             {
                                 "role": "user",
-                                "content": unformatted_prompts[prompt_idx],
+                                "content": f"Prefix:\n{unformatted_prompt}\n\nContinuation:\n{continuations[prompt_idx]}",
                             },
                         ],
                         tokenize=False,
@@ -110,18 +96,12 @@ Predict at least a few sentences of the document continuation (all documents giv
                 generated_prompt_indices.append(prompt_idx)
                 prompts.append(prompt)
             outputs = teacher.generate(prompts, sampling_params) if prompts else []
-            outputs_by_prompt_idx = dict(zip(generated_prompt_indices, outputs))
 
-            for prompt_idx, mode in enumerate(thinking_modes):
-                if mode == "nothink":
-                    trajectory_texts = ["<think></think>"]
-                else:
-                    if prompt_idx not in outputs_by_prompt_idx:
-                        continue
-                    trajectory_texts = [
-                        prepended_think_tag + request_output.text
-                        for request_output in outputs_by_prompt_idx[prompt_idx].outputs
-                    ]
+            for prompt_idx, output in zip(generated_prompt_indices, outputs):
+                trajectory_texts = [
+                    prepended_think_tag + request_output.text
+                    for request_output in output.outputs
+                ]
 
                 for trajectory_text in trajectory_texts:
                     if (
@@ -143,7 +123,6 @@ Predict at least a few sentences of the document continuation (all documents giv
                                 "continuation_ids": [
                                     int(t) for t in tokenized_continuations[prompt_idx]
                                 ],
-                                "thinking_mode": mode,
                             }
                         )
                         + "\n"

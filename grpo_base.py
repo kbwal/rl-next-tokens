@@ -112,11 +112,13 @@ class ThinkReward:
         return rewards  # type: ignore
 
 
-run_name = "grpo-base-overfitting"
+run_name = "grpo-overfit-nvidia-style-3e-5"
 parser = argparse.ArgumentParser()
 parser.add_argument("--seed", type=int, default=0)
 parser.add_argument("--g", type=int, default=8)
 parser.add_argument("--b", type=int, default=8)
+parser.add_argument("--temperature", type=float, default=1.0)
+parser.add_argument("--max-new-tokens", type=int, default=2048)
 parser.add_argument("--lr", type=float, default=1e-6)
 parser.add_argument("--alpha", type=float, default=0.0)
 parser.add_argument("--min-prefix-len", type=int, default=128)
@@ -129,6 +131,8 @@ args = parser.parse_args()
 SEED = args.seed
 G = args.g
 B = args.b
+T = args.temperature
+MAX_NEW_TOKENS = args.max_new_tokens
 LR = args.lr
 ALPHA = args.alpha
 MAX_CHECKPOINTS = args.max_checkpoints
@@ -170,8 +174,8 @@ grpo_config = GRPOConfig(
     per_device_train_batch_size=G,
     gradient_accumulation_steps=B,
     steps_per_generation=1,
-    max_completion_length=2048,
-    temperature=1.0,
+    max_completion_length=MAX_NEW_TOKENS,
+    temperature=T,
     learning_rate=LR,
     optim="paged_adamw_8bit",
     num_iterations=1,
