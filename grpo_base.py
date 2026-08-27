@@ -16,7 +16,7 @@ from transformers import (
 )
 from trl.trainer.grpo_trainer import GRPOTrainer
 from trl.trainer.grpo_config import GRPOConfig
-from load_data import create_grpo_base_overfit_dataset_full
+from load_data import create_grpo_base_dataset
 
 RLP_INSTRUCTION = (
     "You are a continuation-and-reasoning assistant. You receive the prefix of a "
@@ -112,7 +112,7 @@ class ThinkReward:
         return rewards  # type: ignore
 
 
-run_name = "grpo-overfit-nvidia-style-3e-5"
+run_name = "grpo-base-full-run-1"
 parser = argparse.ArgumentParser()
 parser.add_argument("--seed", type=int, default=0)
 parser.add_argument("--g", type=int, default=8)
@@ -124,6 +124,7 @@ parser.add_argument("--alpha", type=float, default=0.0)
 parser.add_argument("--min-prefix-len", type=int, default=128)
 parser.add_argument("--max-prefix-len", type=int, default=2048)
 parser.add_argument("--continuation-length", type=int, default=16)
+parser.add_argument("--dataset-path", type=str, default="/scratch/datasets/openwebmath_600k")
 parser.add_argument("--max-steps", type=int, default=2000)
 parser.add_argument("--max-checkpoints", type=int, default=3)
 parser.add_argument("--wandb", action="store_true")
@@ -173,7 +174,7 @@ grpo_config = GRPOConfig(
     num_generations=G,
     per_device_train_batch_size=G,
     gradient_accumulation_steps=B,
-    steps_per_generation=1,
+    steps_per_generation=B,
     max_completion_length=MAX_NEW_TOKENS,
     temperature=T,
     learning_rate=LR,
@@ -183,29 +184,30 @@ grpo_config = GRPOConfig(
     seed=SEED,
     bf16=True,
     lr_scheduler_type="constant",
-    # max_steps=args.max_steps,
-    # warmup_steps=int(0.05 * args.max_steps),
-    warmup_ratio=0.05,
+    max_steps=args.max_steps,
+    warmup_steps=int(0.05 * args.max_steps),
+    # warmup_ratio=0.05,
     logging_steps=1,
     save_strategy="steps",
     save_steps=100,
     save_total_limit=MAX_CHECKPOINTS,
     report_to="wandb" if args.wandb else "none",
-    num_train_epochs=100,
+    # num_train_epochs=100,
     use_vllm=True,
     vllm_gpu_memory_utilization=0.3,
-    vllm_max_model_length=3300,
-    vllm_enable_sleep_mode=True,
+    vllm_max_model_length=args.max_prefix_len + args.max_new_tokens + 512,
+    vllm_enable_sleep_mode=False,
     vllm_importance_sampling_correction=False,
     use_liger_kernel=True,
 )
 
-train_dataset = create_grpo_base_overfit_dataset_full(
+train_dataset = create_grpo_base_dataset(
     tokenizer=tokenizer,
     samples_per_doc=1,
     min_prefix_len=args.min_prefix_len,
     max_prefix_len=args.max_prefix_len,
     continuation_length=args.continuation_length,
+    dataset_path=args.dataset_path,
     seed=SEED,
     instruction=RLP_INSTRUCTION,
 )
