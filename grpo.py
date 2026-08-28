@@ -18,7 +18,7 @@ from transformers import (
 )
 from trl.trainer.grpo_trainer import GRPOTrainer
 from trl.trainer.grpo_config import GRPOConfig
-from load_data import create_grpo_dataset, create_grpo_overfit_dataset
+from load_data import create_grpo_dataset_full
 
 
 class ThinkReward:
@@ -39,7 +39,6 @@ class ThinkReward:
         prompts: list[str],
         completions: list[str],
         completion_ids: list[list[int]],
-        continuations: list[str],
         continuation_ids: list[list[int]],
         **kwargs,
     ) -> list[float | None]:
@@ -54,8 +53,7 @@ class ThinkReward:
         completion_ids = [[int(t) for t in c] for c in completion_ids]
         cont_ids = [[int(t) for t in c] for c in continuation_ids]
         full_seq_ids = [
-            p + c + cont
-            for p, c, cont in zip(prompt_ids, completion_ids, cont_ids)
+            p + c + cont for p, c, cont in zip(prompt_ids, completion_ids, cont_ids)
         ]
         full_enc = self.tokenizer.pad(
             {"input_ids": full_seq_ids}, return_tensors="pt", padding=True
@@ -63,10 +61,7 @@ class ThinkReward:
         full_ids = full_enc["input_ids"].to(self.model.device)
         attention_mask = full_enc["attention_mask"].to(self.model.device)
         prefix_len = torch.tensor(
-            [
-                len(p) + len(c)
-                for p, c in zip(prompt_ids, completion_ids)
-            ],
+            [len(p) + len(c) for p, c in zip(prompt_ids, completion_ids)],
             device=self.model.device,
         )
         thinking_len = torch.tensor(
@@ -77,17 +72,14 @@ class ThinkReward:
 
         format_penalties = []
         for c in completions:
-            has_open = "<think>" in c
-            has_close = "</think>" in c
-            if not has_open or not has_close:
+            has_extra_open = "<think>" in c
+            close_count = c.count("</think>")
+            if has_extra_open or close_count != 1:
+                format_penalties.append(self.format_penalty)
+            elif not c.rstrip().endswith("</think>"):
                 format_penalties.append(self.format_penalty)
             else:
-                open_idx = c.find("<think>")
-                close_idx = c.rfind("</think>")
-                if open_idx >= close_idx:
-                    format_penalties.append(self.format_penalty)
-                else:
-                    format_penalties.append(0.0)
+                format_penalties.append(0.0)
 
         format_penalties_tensor = torch.tensor(
             format_penalties, device=self.model.device, dtype=torch.float32
@@ -127,24 +119,29 @@ class ThinkReward:
         return rewards  # type: ignore
 
 
-run_name = "grpo-overfitting"
+run_name = "grpo-scratchpad-data-full-run-1"
 parser = argparse.ArgumentParser()
 parser.add_argument("--seed", type=int, default=0)
 parser.add_argument("--g", type=int, default=8)
 parser.add_argument("--b", type=int, default=8)
+parser.add_argument("--temperature", type=float, default=1.0)
+parser.add_argument("--max-new-tokens", type=int, default=2048)
 parser.add_argument("--lr", type=float, default=1e-6)
 parser.add_argument("--alpha", type=float, default=0.0005)
 parser.add_argument("--format-penalty", type=float, default=3.0)
 parser.add_argument("--min-prefix-len", type=int, default=128)
 parser.add_argument("--max-prefix-len", type=int, default=2048)
 parser.add_argument("--continuation-length", type=int, default=16)
+parser.add_argument("--dataset-path", type=str, default="open-web-math/open-web-math")
 parser.add_argument("--max-steps", type=int, default=2000)
-parser.add_argument("--max-checkpoints", type=int, default=3)
+parser.add_argument("--max-checkpoints", type=int, default=1)
 parser.add_argument("--wandb", action="store_true")
 args = parser.parse_args()
 SEED = args.seed
 G = args.g
 B = args.b
+T = args.temperature
+MAX_NEW_TOKENS = args.max_new_tokens
 LR = args.lr
 ALPHA = args.alpha
 FORMAT_PENALTY = args.format_penalty
@@ -156,7 +153,7 @@ torch.cuda.set_device(device)
 device_map = {"": device}
 model_name, cache_dir = "Qwen/Qwen3-1.7B-Base", "/scratch/hub"
 adapter_path = (
-    "/home/kushalb/rl-ntp/sft-removed-length-bias-checkpoints/run-8-0.0001/batch_1096"
+    "./sft-checkpoints/sft-new-scratchpad-data-checkpoints/run-32-0.0003-1.0/batch_276"
 )
 
 tokenizer = AutoTokenizer.from_pretrained(model_name, cache_dir=cache_dir)
@@ -194,35 +191,42 @@ grpo_config = GRPOConfig(
     num_generations=G,
     per_device_train_batch_size=G,
     gradient_accumulation_steps=B,
-    steps_per_generation=1,
-    max_completion_length=200,
-    temperature=1.0,
+    steps_per_generation=B,
+    max_completion_length=MAX_NEW_TOKENS,
+    temperature=T,
     learning_rate=LR,
     optim="paged_adamw_8bit",
     num_iterations=1,
-    generation_kwargs={"eos_token_id": [tokenizer.eos_token_id, closethink_id]},
+    generation_kwargs={"stop_token_ids": [tokenizer.eos_token_id, closethink_id]},
     seed=SEED,
     bf16=True,
-    lr_scheduler_type="cosine",
-    # max_steps=args.max_steps,
-    # warmup_steps=int(0.05 * args.max_steps),
-    warmup_ratio=0.05,
-    logging_steps=5,
+    lr_scheduler_type="constant",
+    max_steps=args.max_steps,
+    warmup_steps=int(0.05 * args.max_steps),
+    # warmup_ratio=0.05,
+    logging_steps=1,
     save_strategy="steps",
     save_steps=100,
     save_total_limit=MAX_CHECKPOINTS,
     report_to="wandb" if args.wandb else "none",
-    num_train_epochs=100,
+    # num_train_epochs=100,
+    use_vllm=True,
+    vllm_gpu_memory_utilization=0.3,
+    vllm_max_model_length=args.max_prefix_len + args.max_new_tokens + 512,
+    vllm_enable_sleep_mode=False,
+    vllm_importance_sampling_correction=False,
+    use_liger_kernel=True,
 )
 
-train_dataset = create_grpo_overfit_dataset(
+train_dataset = create_grpo_dataset_full(
     tokenizer=tokenizer,
     samples_per_doc=1,
     min_prefix_len=args.min_prefix_len,
     max_prefix_len=args.max_prefix_len,
     continuation_length=args.continuation_length,
-    dataset_path="/scratch/datasets/openwebmath_600k",
+    dataset_path=args.dataset_path,
     seed=SEED,
+    force_open_think=True,
 )
 
 trainer = GRPOTrainer(
