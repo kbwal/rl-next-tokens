@@ -14,20 +14,58 @@ def main():
     )
 
     max_model_len = 8192
-    max_tokens = 2048
-    prepended_think_tag = "<think>"
-    system_prompt = """
-Your goal is to produce thinking traces that would help someone go from the prefix to the continuation WITHOUT having seen the continuation and only having seen the prefix.
-You will be given document prefixes and the true continuation, and your job is to produce these thinking traces, in between <think> and </think>.
-Note: your job is to do this for someone who has NOT seen the actual continuation, ergo you should not mention that you know / have seen the true continuation.
-Your reasoning should serve as a strong bridge, such that someone who has seen the prefix and your thinking should have a good chance at predicting what comes next without having seen it.
-Do NOT just mention that you know the true continuation, instead you should be using it as a hint to guide you into better reasoning, not as a final answer.
-Feel free to think as long as you'd like, but be specific and to the point. Your thinking should include drafts of a few potential continuations. No rambling about meta-commentary or useless things. It is okay if your thinking is highly information dense.
-"""
+    max_tokens = 4096
+    system_prompt = """You are a reasoning trace generator for language model training.
+
+You will be given:
+- <prefix>: The context the model has seen so far.
+- <target_continuation>: The ground-truth continuation that follows the prefix (shown to you ONLY as reference for the target direction).
+
+### Your Goal
+Generate a high-quality, dense <think>...</think> reasoning trace that prepares a reader to predict what comes next.
+Because open-ended text has many possible paths, use <target_continuation> to know which topic/direction to explore, but your reasoning MUST be strictly causal and grounded in the prefix.
+
+### Rules
+1. No telepathy / future citations:
+   - You MUST NOT mention, quote, or copy any unseen proper nouns, specific author names, forum usernames, random dates, exact coordinates, or future URLs from <target_continuation> unless they were already stated in <prefix> or you can cleanly derive them.
+   - If the continuation introduces a new entity or arbitrary number, reason about the *general category*, *structural transition*, or *relevant formulas/principles*, never the arbitrary specific token. Only mention the specific token if you have a clear way to lead to it.
+   - E.g. it's okay to mention a specific math number as the answer to a formula if you perform the computation in your thinking, but it isn't okay to predict a citation that you have no way of seeing coming from the prefix.
+2. Use <target_continuation> as a guide, not an answer sheet:
+   - Look at the continuation -> ask: "What clues, premises, or structural setups in the prefix foreshadowed this direction?" -> build your internal thought around those prefix clues.
+3. No meta-prompt artifacts:
+   - Never say "the continuation", "true continuation", "given continuation", "in the prompt", "the target text", or "the author continues".
+   - Basically, you're going in from the POV of someone who has never seen <target_continuation>
+   - Speak in the first person present tense as an internal monologue looking ONLY at the prefix (e.g. "The prefix establishes...", "I need to calculate...", "The next logical point to address is...").
+
+### Examples
+
+Example 1: Next Paper / Document in a List
+- <prefix>: "...quantum cohomology of toric Fano manifolds. Moreover, this holds for any"
+- <target_continuation>: "Fano manifold. Working paper Adler D., Gritsenko V. 2019..."
+- Cheating: "The next entry will be a working paper by Adler D. and Gritsenko V. from 2019."
+- Causal: "The sentence is cut off after 'any', which naturally completes to 'Fano manifold' by dropping the 'toric' restriction. Following this entry, the document pattern indicates another working paper listing will follow, likely continuing with algebraic geometry or related polynomial rings."
+
+Example 2: Forum Post User Reply
+- <prefix>: "Why does my code throw this index error? 5. May 2, 2008"
+- <target_continuation>: "### rock.freak667\\n\\nYou forgot to..."
+- Cheating: "The next post is by user rock.freak667."
+- Causal: "The prefix ends at a new post header. A responder will likely reply to address the index out-of-bounds error, probably checking array length or the loop bounds."
+
+### Output Format:
+You can speak normally before <think> to plan your strategy, but once you emit <think>, your thinking trace will be recorded.
+
+[SCRATCHPAD]
+1. Target Direction: (What general direction/topic does the continuation take?)
+2. Prefix Clues: (What dormant clues in the prefix support this direction?)
+3. Forbidden Tokens: (What specific unseen names, numbers, or exact quotes from the continuation must NOT appear in the thought?)
+
+<think>
+[Your grounded, clue-driven reasoning trace here]
+</think>"""
     system_prompt_len = len(tokenizer.encode(system_prompt))
     max_prefix_len = max_model_len - max_tokens - system_prompt_len - 256  # jic buffer
-    filename = f"./teacher_traces_new.jsonl"
-    total_num_docs = 5000
+    filename = f"./teacher_traces/scratchpad_prompt_traces.jsonl"
+    total_num_docs = 2500
     B = 100
     num_samples_per_doc = 1
     min_prefix_len = 128
@@ -50,8 +88,6 @@ Feel free to think as long as you'd like, but be specific and to the point. Your
         include_stop_str_in_output=True,
     )
 
-    # Slice documents in the student's vocabulary so the saved IDs can be used
-    # directly during SFT without a lossy decode/re-tokenize round trip.
     training_dataset = TrainingDataset(student_tokenizer)
 
     with open(filename, "a", encoding="utf-8") as f:
@@ -73,22 +109,23 @@ Feel free to think as long as you'd like, but be specific and to the point. Your
             generated_prompt_indices = []
             prompts = []
             for prompt_idx, unformatted_prompt in enumerate(unformatted_prompts):
-                prompt = (
-                    tokenizer.apply_chat_template(
-                        [
-                            {
-                                "role": "system",
-                                "content": system_prompt,
-                            },
-                            {
-                                "role": "user",
-                                "content": f"Prefix:\n{unformatted_prompt}\n\nContinuation:\n{continuations[prompt_idx]}",
-                            },
-                        ],
-                        tokenize=False,
-                        add_generation_prompt=True,
-                    )
-                    + prepended_think_tag
+                user_content = (
+                    f"<prefix>\n{unformatted_prompt}\n</prefix>\n\n"
+                    f"<target_continuation>\n{continuations[prompt_idx]}\n</target_continuation>"
+                )
+                prompt = tokenizer.apply_chat_template(
+                    [
+                        {
+                            "role": "system",
+                            "content": system_prompt,
+                        },
+                        {
+                            "role": "user",
+                            "content": user_content,
+                        },
+                    ],
+                    tokenize=False,
+                    add_generation_prompt=True,
                 )
                 prompt_length = len(tokenizer(prompt)["input_ids"])
                 if prompt_length + max_tokens > max_model_len:
@@ -98,18 +135,17 @@ Feel free to think as long as you'd like, but be specific and to the point. Your
             outputs = teacher.generate(prompts, sampling_params) if prompts else []
 
             for prompt_idx, output in zip(generated_prompt_indices, outputs):
-                trajectory_texts = [
-                    prepended_think_tag + request_output.text
-                    for request_output in output.outputs
-                ]
-
-                for trajectory_text in trajectory_texts:
-                    if (
-                        trajectory_text.count("<think>") != 1
-                        or trajectory_text.count("</think>") != 1
-                        or not trajectory_text.endswith("</think>")
-                    ):
+                for request_output in output.outputs:
+                    raw_text = request_output.text
+                    if "<think>" not in raw_text or "</think>" not in raw_text:
                         continue
+
+                    inner_thought = (
+                        raw_text.split("<think>")[1].split("</think>")[0].strip()
+                    )
+                    if not inner_thought:
+                        continue
+                    trajectory_text = f"<think>\n{inner_thought}\n</think>"
 
                     f.write(
                         json.dumps(

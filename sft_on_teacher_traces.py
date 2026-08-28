@@ -71,9 +71,7 @@ def collate_teacher_batch(batch):
     attention_rows = []
     think_rows = []
     continuation_rows = []
-    for prefix, thought, continuation in zip(
-        prefix_ids, thought_ids, continuation_ids
-    ):
+    for prefix, thought, continuation in zip(prefix_ids, thought_ids, continuation_ids):
         input_rows.append(
             torch.tensor(prefix + thought + continuation, dtype=torch.long)
         )
@@ -118,8 +116,13 @@ parser.add_argument("--r", type=int, default=16)
 parser.add_argument("--b", type=int, default=8)
 parser.add_argument("--lr", type=float, default=3e-4)
 parser.add_argument("--alpha", type=float, default=0.25)
-parser.add_argument("--checkpoint-root", type=Path, default=Path("."))
-parser.add_argument("--max-checkpoints", type=int, default=3)
+parser.add_argument(
+    "--data-file",
+    type=Path,
+    default=Path("./teacher_traces/scratchpad_prompt_traces.jsonl"),
+)
+parser.add_argument("--checkpoint-root", type=Path, default=Path("./sft-checkpoints"))
+parser.add_argument("--max-checkpoints", type=int, default=1)
 parser.add_argument("--wandb", action="store_true")
 args = parser.parse_args()
 SEED = args.seed
@@ -150,14 +153,16 @@ config = {
     "seed": SEED,
 }
 
-run_name = "sft-removed-length-bias"
+run_name = "sft-new-scratchpad-data"
 if args.wandb:
     wandb.init(
         project="rl-ntp",
-        name=f"{run_name}-{R}-{LR}",
+        name=f"{run_name}-{R}-{LR}-{ALPHA}",
         config=config,
     )
-CHECKPOINT_ROOT = args.checkpoint_root / f"{run_name}-checkpoints" / f"run-{R}-{LR}"
+CHECKPOINT_ROOT = (
+    args.checkpoint_root / f"{run_name}-checkpoints" / f"run-{R}-{LR}-{ALPHA}"
+)
 
 random.seed(SEED)
 torch.manual_seed(SEED)
@@ -180,7 +185,7 @@ model.enable_input_require_grads()
 
 lora_model = get_peft_model(model, lora_config)
 optimizer = optim.AdamW(params=lora_model.parameters(), lr=LR, fused=True)
-dataset = TeacherDataset("./teacher_traces.jsonl")
+dataset = TeacherDataset(args.data_file)
 dataloader = DataLoader(
     dataset,
     batch_size=B,

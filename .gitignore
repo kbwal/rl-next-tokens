@@ -7,6 +7,6 @@ wheels/
 .venv
 .vscode
 wandb/
-teacher_traces*.jsonl
+teacher_traces
 sft-checkpoints
 grpo-checkpoints
