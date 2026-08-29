@@ -156,15 +156,14 @@ def create_grpo_dataset_full(
     dataset_path: str = "open-web-math/open-web-math",
     seed: int = 0,
     split: str = "train",
-    num_proc: int = 8,
     cache_dir: str = "/scratch/datasets/openwebmath",
     force_open_think: bool = True,
 ) -> IterableDataset:
     raw_data: Any = load_dataset(
         dataset_path,
         split=split,
-        num_proc=num_proc,
         cache_dir=cache_dir,
+        streaming=True,
     )
     generator = torch.Generator().manual_seed(seed)
 
@@ -373,14 +372,13 @@ def create_grpo_base_dataset_full(
     seed: int = 0,
     instruction: str = "",
     split: str = "train",
-    num_proc: int = 8,
     cache_dir: str = "/scratch/datasets/openwebmath",
 ) -> IterableDataset:
     raw_data: Any = load_dataset(
         dataset_path,
         split=split,
-        num_proc=num_proc,
         cache_dir=cache_dir,
+        streaming=True,
     )
     generator = torch.Generator().manual_seed(seed)
 
