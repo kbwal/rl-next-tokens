@@ -1,3 +1,4 @@
+import copy
 from typing import Any
 from datasets import Dataset, IterableDataset, load_dataset, load_from_disk
 import torch
@@ -45,6 +46,20 @@ def _grpo_row(
     if instruction is not None:
         row["raw_prefix"] = prefix
     return row
+
+
+def _load_streaming_corpus(
+    dataset_path: str,
+    split: str,
+    cache_dir: str,
+    seed: int,
+):
+    return load_dataset(
+        dataset_path,
+        split=split,
+        cache_dir=cache_dir,
+        streaming=True,
+    ).shuffle(seed=seed, buffer_size=1, max_buffer_input_shards=1)
 
 
 def create_grpo_dataset(
@@ -158,19 +173,21 @@ def create_grpo_dataset_full(
     split: str = "train",
     cache_dir: str = "/scratch/datasets/openwebmath",
     force_open_think: bool = True,
+    shuffle_buffer_size: int = 5_000,
 ) -> IterableDataset:
-    raw_data: Any = load_dataset(
-        dataset_path,
-        split=split,
-        cache_dir=cache_dir,
-        streaming=True,
-    ).shuffle(seed=seed, buffer_size=50_000)
+    tokenizer = copy.deepcopy(tokenizer)
+    raw_data: Any = _load_streaming_corpus(dataset_path, split, cache_dir, seed)
     generator = torch.Generator().manual_seed(seed)
 
     def gen():
         for item in raw_data:
             text = item["text"]
-            token_ids = tokenizer(text, add_special_tokens=False)["input_ids"]
+            token_ids = tokenizer(
+                text,
+                add_special_tokens=False,
+                truncation=True,
+                max_length=max_prefix_len + continuation_length,
+            )["input_ids"]
             n = len(token_ids)
             max_split_point = min(n - continuation_length, max_prefix_len)
 
@@ -198,7 +215,11 @@ def create_grpo_dataset_full(
                 if row is not None:
                     yield row
 
-    return IterableDataset.from_generator(gen)
+    return IterableDataset.from_generator(gen).shuffle(
+        seed=seed,
+        buffer_size=shuffle_buffer_size,
+        max_buffer_input_shards=1,
+    )
 
 
 def create_grpo_overfit_dataset_full(
@@ -373,19 +394,21 @@ def create_grpo_base_dataset_full(
     instruction: str = "",
     split: str = "train",
     cache_dir: str = "/scratch/datasets/openwebmath",
+    shuffle_buffer_size: int = 5_000,
 ) -> IterableDataset:
-    raw_data: Any = load_dataset(
-        dataset_path,
-        split=split,
-        cache_dir=cache_dir,
-        streaming=True,
-    ).shuffle(seed=seed, buffer_size=50_000)
+    tokenizer = copy.deepcopy(tokenizer)
+    raw_data: Any = _load_streaming_corpus(dataset_path, split, cache_dir, seed)
     generator = torch.Generator().manual_seed(seed)
 
     def gen():
         for item in raw_data:
             text = item["text"]
-            token_ids = tokenizer(text, add_special_tokens=False)["input_ids"]
+            token_ids = tokenizer(
+                text,
+                add_special_tokens=False,
+                truncation=True,
+                max_length=max_prefix_len + continuation_length,
+            )["input_ids"]
             n = len(token_ids)
             max_split_point = min(n - continuation_length, max_prefix_len)
 
@@ -413,7 +436,11 @@ def create_grpo_base_dataset_full(
                 if row is not None:
                     yield row
 
-    return IterableDataset.from_generator(gen)
+    return IterableDataset.from_generator(gen).shuffle(
+        seed=seed,
+        buffer_size=shuffle_buffer_size,
+        max_buffer_input_shards=1,
+    )
 
 
 def create_grpo_base_overfit_dataset_full(

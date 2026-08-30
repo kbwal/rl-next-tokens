@@ -21,18 +21,14 @@ from trl.trainer.grpo_config import GRPOConfig
 from load_data import create_grpo_dataset_full
 
 
-class ThinkReward:
+class ContinuationReward:
     def __init__(
         self,
         model: PreTrainedModel,
         tokenizer: PreTrainedTokenizerBase,
-        alpha: float,
-        format_penalty: float,
     ):
         self.model = model
         self.tokenizer = tokenizer
-        self.alpha = alpha
-        self.format_penalty = format_penalty
 
     def __call__(
         self,
@@ -64,26 +60,6 @@ class ThinkReward:
             [len(p) + len(c) for p, c in zip(prompt_ids, completion_ids)],
             device=self.model.device,
         )
-        thinking_len = torch.tensor(
-            [len(c) for c in completion_ids],
-            device=self.model.device,
-            dtype=torch.float32,
-        )
-
-        format_penalties = []
-        for c in completions:
-            has_extra_open = "<think>" in c
-            close_count = c.count("</think>")
-            if has_extra_open or close_count != 1:
-                format_penalties.append(self.format_penalty)
-            elif not c.rstrip().endswith("</think>"):
-                format_penalties.append(self.format_penalty)
-            else:
-                format_penalties.append(0.0)
-
-        format_penalties_tensor = torch.tensor(
-            format_penalties, device=self.model.device, dtype=torch.float32
-        )
 
         # note: this only works if the lengths of the continuations are the same
         # otherwise it won't, and it just cuts off to the min
@@ -108,15 +84,38 @@ class ThinkReward:
             labels = torch.gather(full_ids, 1, shift_logit_indexes + 1)
             token_log_probs = log_probs.gather(2, labels.unsqueeze(-1)).squeeze(-1)
             sequence_log_probs = token_log_probs.mean(dim=-1)
-            total_rewards = (
-                sequence_log_probs - self.alpha * thinking_len - format_penalties_tensor
-            )
-            rewards.extend(total_rewards.tolist())
+            rewards.extend(sequence_log_probs.tolist())
 
         if was_training:
             self.model.train()
 
         return rewards  # type: ignore
+
+
+class FormatPenaltyReward:
+    def __init__(self, format_penalty: float):
+        self.format_penalty = format_penalty
+
+    def __call__(self, completions: list[str], **kwargs) -> list[float]:
+        rewards = []
+        for c in completions:
+            has_extra_open = "<think>" in c
+            close_count = c.count("</think>")
+            if has_extra_open or close_count != 1:
+                rewards.append(-self.format_penalty)
+            elif not c.rstrip().endswith("</think>"):
+                rewards.append(-self.format_penalty)
+            else:
+                rewards.append(0.0)
+        return rewards
+
+
+class LengthPenaltyReward:
+    def __init__(self, alpha: float):
+        self.alpha = alpha
+
+    def __call__(self, completion_ids: list[list[int]], **kwargs) -> list[float]:
+        return [-self.alpha * float(len(c)) for c in completion_ids]
 
 
 run_name = "grpo-scratchpad-data-full-run-2"
@@ -232,9 +231,11 @@ train_dataset = create_grpo_dataset_full(
 trainer = GRPOTrainer(
     model=model,
     processing_class=tokenizer,
-    reward_funcs=ThinkReward(
-        model, tokenizer, alpha=ALPHA, format_penalty=FORMAT_PENALTY
-    ),
+    reward_funcs=[
+        ContinuationReward(model, tokenizer),
+        FormatPenaltyReward(format_penalty=FORMAT_PENALTY),
+        LengthPenaltyReward(alpha=ALPHA),
+    ],
     args=grpo_config,
     train_dataset=train_dataset,
 )
