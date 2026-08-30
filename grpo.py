@@ -119,9 +119,9 @@ class ThinkReward:
         return rewards  # type: ignore
 
 
-run_name = "grpo-scratchpad-data-full-run-1"
+run_name = "grpo-scratchpad-data-full-run-2"
 parser = argparse.ArgumentParser()
-parser.add_argument("--seed", type=int, default=0)
+parser.add_argument("--seed", type=int, default=1)
 parser.add_argument("--g", type=int, default=8)
 parser.add_argument("--b", type=int, default=8)
 parser.add_argument("--temperature", type=float, default=1.0)

@@ -114,7 +114,7 @@ class ThinkReward:
 
 run_name = "grpo-base-full-run-1"
 parser = argparse.ArgumentParser()
-parser.add_argument("--seed", type=int, default=0)
+parser.add_argument("--seed", type=int, default=1)
 parser.add_argument("--g", type=int, default=8)
 parser.add_argument("--b", type=int, default=8)
 parser.add_argument("--temperature", type=float, default=1.0)

@@ -57,7 +57,7 @@ def create_grpo_dataset(
     seed: int,
     force_open_think: bool = True,
 ) -> IterableDataset:
-    raw_data: Any = load_from_disk(dataset_path)
+    raw_data: Any = load_from_disk(dataset_path).shuffle(seed=seed)
     generator = torch.Generator().manual_seed(seed)
 
     def gen():
@@ -105,7 +105,7 @@ def create_grpo_overfit_dataset(
     num_samples: int = 8,
     force_open_think: bool = True,
 ) -> Dataset:
-    raw_data: Any = load_from_disk(dataset_path)
+    raw_data: Any = load_from_disk(dataset_path).shuffle(seed=seed)
     generator = torch.Generator().manual_seed(seed)
 
     samples = []
@@ -164,7 +164,7 @@ def create_grpo_dataset_full(
         split=split,
         cache_dir=cache_dir,
         streaming=True,
-    )
+    ).shuffle(seed=seed, buffer_size=50_000)
     generator = torch.Generator().manual_seed(seed)
 
     def gen():
@@ -220,7 +220,7 @@ def create_grpo_overfit_dataset_full(
         split=split,
         num_proc=num_proc,
         cache_dir=cache_dir,
-    )
+    ).shuffle(seed=seed)
     generator = torch.Generator().manual_seed(seed)
 
     samples = []
@@ -272,7 +272,7 @@ def create_grpo_base_dataset(
     seed: int,
     instruction: str,
 ) -> IterableDataset:
-    raw_data: Any = load_from_disk(dataset_path)
+    raw_data: Any = load_from_disk(dataset_path).shuffle(seed=seed)
     generator = torch.Generator().manual_seed(seed)
 
     def gen():
@@ -320,7 +320,7 @@ def create_grpo_base_overfit_dataset(
     instruction: str,
     num_samples: int = 8,
 ) -> Dataset:
-    raw_data: Any = load_from_disk(dataset_path)
+    raw_data: Any = load_from_disk(dataset_path).shuffle(seed=seed)
     generator = torch.Generator().manual_seed(seed)
 
     samples = []
@@ -379,7 +379,7 @@ def create_grpo_base_dataset_full(
         split=split,
         cache_dir=cache_dir,
         streaming=True,
-    )
+    ).shuffle(seed=seed, buffer_size=50_000)
     generator = torch.Generator().manual_seed(seed)
 
     def gen():
@@ -435,7 +435,7 @@ def create_grpo_base_overfit_dataset_full(
         split=split,
         num_proc=num_proc,
         cache_dir=cache_dir,
-    )
+    ).shuffle(seed=seed)
     generator = torch.Generator().manual_seed(seed)
 
     samples = []
@@ -492,7 +492,7 @@ class TrainingDataset:
             split=split,
             num_proc=num_proc,
             cache_dir=cache_dir,
-        )
+        ).shuffle(seed=seed)
         self.tokenizer = tokenizer
         self.generator = torch.Generator().manual_seed(seed)
 

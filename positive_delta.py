@@ -172,7 +172,7 @@ def main():
     sft_scorer.config.pad_token_id = tokenizer.pad_token_id
     sft_scorer.eval()
 
-    raw_data = load_from_disk(args.dataset_path)
+    raw_data = load_from_disk(args.dataset_path).shuffle(seed=args.seed)
     total_docs = min(args.total_docs, len(raw_data))
     doc_generator = torch.Generator().manual_seed(args.seed)
 
