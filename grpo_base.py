@@ -34,10 +34,12 @@ class ThinkReward:
         model: PreTrainedModel,
         tokenizer: PreTrainedTokenizerBase,
         alpha: float,
+        batch_size: int = 32,
     ):
         self.model = model
         self.tokenizer = tokenizer
         self.alpha = alpha
+        self.batch_size = batch_size
 
     def __call__(
         self,
@@ -58,53 +60,65 @@ class ThinkReward:
         prompt_ids = [[int(t) for t in p] for p in prompt_ids]
         completion_ids = [[int(t) for t in c] for c in completion_ids]
         cont_ids = [[int(t) for t in c] for c in continuation_ids]
-        full_seq_ids = [
-            p + c + cont
-            for p, c, cont in zip(prompt_ids, completion_ids, cont_ids)
-        ]
-        full_enc = self.tokenizer.pad(
-            {"input_ids": full_seq_ids}, return_tensors="pt", padding=True
-        )
-        full_ids = full_enc["input_ids"].to(self.model.device)
-        attention_mask = full_enc["attention_mask"].to(self.model.device)
-        prefix_len = torch.tensor(
-            [
-                len(p) + len(c)
-                for p, c in zip(prompt_ids, completion_ids)
-            ],
-            device=self.model.device,
-        )
-        thinking_len = torch.tensor(
-            [len(c) for c in completion_ids],
-            device=self.model.device,
-            dtype=torch.float32,
-        )
 
         # note: this only works if the lengths of the continuations are the same
         # otherwise it won't, and it just cuts off to the min
         length_of_continuation = min(len(c) for c in cont_ids)
 
         with torch.no_grad():
-            last_hidden = self.model.model(
-                input_ids=full_ids, attention_mask=attention_mask
-            ).last_hidden_state
+            for i in range(0, len(prompt_ids), self.batch_size):
+                chunk_prompt_ids = prompt_ids[i : i + self.batch_size]
+                chunk_completion_ids = completion_ids[i : i + self.batch_size]
+                chunk_cont_ids = cont_ids[i : i + self.batch_size]
 
-            shift_logit_indexes = (prefix_len - 1).unsqueeze(1) + torch.arange(
-                length_of_continuation, device=self.model.device
-            ).unsqueeze(0)
+                chunk_full_seq_ids = [
+                    p + c + cont
+                    for p, c, cont in zip(
+                        chunk_prompt_ids, chunk_completion_ids, chunk_cont_ids
+                    )
+                ]
+                full_enc = self.tokenizer.pad(
+                    {"input_ids": chunk_full_seq_ids},
+                    return_tensors="pt",
+                    padding=True,
+                )
+                full_ids = full_enc["input_ids"].to(self.model.device)
+                attention_mask = full_enc["attention_mask"].to(self.model.device)
+                prefix_len = torch.tensor(
+                    [
+                        len(p) + len(c)
+                        for p, c in zip(chunk_prompt_ids, chunk_completion_ids)
+                    ],
+                    device=self.model.device,
+                )
+                thinking_len = torch.tensor(
+                    [len(c) for c in chunk_completion_ids],
+                    device=self.model.device,
+                    dtype=torch.float32,
+                )
 
-            continuation_hidden = torch.gather(
-                last_hidden,
-                1,
-                shift_logit_indexes.unsqueeze(-1).expand(-1, -1, last_hidden.size(2)),
-            )
-            only_continuation_logits = self.model.lm_head(continuation_hidden)
-            log_probs = F.log_softmax(only_continuation_logits, dim=-1)
-            labels = torch.gather(full_ids, 1, shift_logit_indexes + 1)
-            token_log_probs = log_probs.gather(2, labels.unsqueeze(-1)).squeeze(-1)
-            sequence_log_probs = token_log_probs.mean(dim=-1)
-            total_rewards = sequence_log_probs - self.alpha * thinking_len
-            rewards.extend(total_rewards.tolist())
+                last_hidden = self.model.model(
+                    input_ids=full_ids, attention_mask=attention_mask
+                ).last_hidden_state
+
+                shift_logit_indexes = (prefix_len - 1).unsqueeze(1) + torch.arange(
+                    length_of_continuation, device=self.model.device
+                ).unsqueeze(0)
+
+                continuation_hidden = torch.gather(
+                    last_hidden,
+                    1,
+                    shift_logit_indexes.unsqueeze(-1).expand(
+                        -1, -1, last_hidden.size(2)
+                    ),
+                )
+                only_continuation_logits = self.model.lm_head(continuation_hidden)
+                log_probs = F.log_softmax(only_continuation_logits, dim=-1)
+                labels = torch.gather(full_ids, 1, shift_logit_indexes + 1)
+                token_log_probs = log_probs.gather(2, labels.unsqueeze(-1)).squeeze(-1)
+                sequence_log_probs = token_log_probs.mean(dim=-1)
+                total_rewards = sequence_log_probs - self.alpha * thinking_len
+                rewards.extend(total_rewards.tolist())
 
         if was_training:
             self.model.train()
