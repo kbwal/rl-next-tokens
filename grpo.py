@@ -136,7 +136,7 @@ class LengthPenaltyReward:
         return [-self.alpha * float(len(c)) for c in completion_ids]
 
 
-run_name = "grpo-scratchpad-data-full-run-3"
+run_name = "grpo-scratchpad-data-full-run-5"
 parser = argparse.ArgumentParser()
 parser.add_argument("--seed", type=int, default=1)
 parser.add_argument("--g", type=int, default=8)

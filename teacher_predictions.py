@@ -1,16 +1,22 @@
-from transformers import AutoTokenizer
-from vllm import LLM, SamplingParams
-from load_data import TrainingDataset
 import gc
 import json
 import os
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from vllm import LLM, SamplingParams
+from load_data import ReasoningSplitsDataset
 
 
 def main():
     teacher_model_path = "/scratch/hub/gemma4_31b/models--Intel--gemma-4-31B-it-int4-AutoRound/snapshots/a428c96a57976947b0f12735f0cf5fcae69019ad"
+    student_model_name = "Qwen/Qwen3-1.7B-Base"
+    cache_dir = "/scratch/hub"
+    dataset_path = "open-web-math/open-web-math"
+    dataset_cache_dir = "/scratch/datasets/openwebmath"
+
     tokenizer = AutoTokenizer.from_pretrained(teacher_model_path)
     student_tokenizer = AutoTokenizer.from_pretrained(
-        "Qwen/Qwen3-1.7B-Base", cache_dir="/scratch/hub"
+        student_model_name, cache_dir=cache_dir
     )
 
     max_model_len = 8192
@@ -37,20 +43,6 @@ Because open-ended text has many possible paths, use <target_continuation> to kn
    - Basically, you're going in from the POV of someone who has never seen <target_continuation>
    - Speak in the first person present tense as an internal monologue looking ONLY at the prefix (e.g. "The prefix establishes...", "I need to calculate...", "The next logical point to address is...").
 
-### Examples
-
-Example 1: Next Paper / Document in a List
-- <prefix>: "...quantum cohomology of toric Fano manifolds. Moreover, this holds for any"
-- <target_continuation>: "Fano manifold. Working paper Adler D., Gritsenko V. 2019..."
-- Cheating: "The next entry will be a working paper by Adler D. and Gritsenko V. from 2019."
-- Causal: "The sentence is cut off after 'any', which naturally completes to 'Fano manifold' by dropping the 'toric' restriction. Following this entry, the document pattern indicates another working paper listing will follow, likely continuing with algebraic geometry or related polynomial rings."
-
-Example 2: Forum Post User Reply
-- <prefix>: "Why does my code throw this index error? 5. May 2, 2008"
-- <target_continuation>: "### rock.freak667\\n\\nYou forgot to..."
-- Cheating: "The next post is by user rock.freak667."
-- Causal: "The prefix ends at a new post header. A responder will likely reply to address the index out-of-bounds error, probably checking array length or the loop bounds."
-
 ### Output Format:
 You can speak normally before <think> to plan your strategy, but once you emit <think>, your thinking trace will be recorded.
 
@@ -60,22 +52,34 @@ You can speak normally before <think> to plan your strategy, but once you emit <
 3. Forbidden Tokens: (What specific unseen names, numbers, or exact quotes from the continuation must NOT appear in the thought?)
 
 <think>
-[Your grounded, clue-driven reasoning trace here]
+[Your step-by-step derivation / reasoning trace here]
 </think>"""
     system_prompt_len = len(tokenizer.encode(system_prompt))
     max_prefix_len = max_model_len - max_tokens - system_prompt_len - 256  # jic buffer
-    filename = f"./teacher_traces/scratchpad_prompt_traces.jsonl"
-    total_num_docs = 2500
-    B = 100
+    filename = f"./teacher_traces/good_split_traces.jsonl"
+    os.makedirs(os.path.dirname(filename), exist_ok=True)
+
+    target_samples = 500
+    B = 50
     num_samples_per_doc = 1
     min_prefix_len = 128
     continuation_length = 64
+    scorer_device = "cuda:0"
+
+    student_model = AutoModelForCausalLM.from_pretrained(
+        student_model_name,
+        cache_dir=cache_dir,
+        device_map=scorer_device,
+        dtype=torch.bfloat16,
+        attn_implementation="sdpa",
+    )
+    student_model.eval()
 
     teacher = LLM(
         teacher_model_path,
         tensor_parallel_size=4,
         max_model_len=max_model_len,
-        gpu_memory_utilization=0.8,
+        gpu_memory_utilization=0.6,
         dtype="bfloat16",
         trust_remote_code=True,
     )
@@ -88,11 +92,27 @@ You can speak normally before <think> to plan your strategy, but once you emit <
         include_stop_str_in_output=True,
     )
 
-    training_dataset = TrainingDataset(student_tokenizer)
+    training_dataset = ReasoningSplitsDataset(
+        tokenizer=student_tokenizer,
+        scorer_model=student_model,
+        scorer_device=scorer_device,
+        dataset_path=dataset_path,
+        cache_dir=dataset_cache_dir,
+        min_logprob=-4.5,
+        max_logprob=-1.0,
+        score_window_len=16,
+        max_rolling_logprob=-0.8,
+        filter_multidomain=True,
+    )
+
+    total_saved_traces = 0
+    starting_doc_index = 0
 
     with open(filename, "a", encoding="utf-8") as f:
-        for starting_doc_index in range(0, total_num_docs, B):
-            batch_num_docs = min(B, total_num_docs - starting_doc_index)
+        while total_saved_traces < target_samples and starting_doc_index < len(
+            training_dataset
+        ):
+            batch_num_docs = min(B, len(training_dataset) - starting_doc_index)
             tokenized_prefixes, tokenized_continuations = (
                 training_dataset.get_prefix_continuation_pairs(
                     starting_doc_index=starting_doc_index,
@@ -103,6 +123,11 @@ You can speak normally before <think> to plan your strategy, but once you emit <
                     max_prefix_len=max_prefix_len,
                 )
             )
+
+            if not tokenized_prefixes:
+                starting_doc_index += batch_num_docs
+                continue
+
             unformatted_prompts = student_tokenizer.batch_decode(tokenized_prefixes)
             continuations = student_tokenizer.batch_decode(tokenized_continuations)
 
@@ -132,6 +157,7 @@ You can speak normally before <think> to plan your strategy, but once you emit <
                     continue
                 generated_prompt_indices.append(prompt_idx)
                 prompts.append(prompt)
+
             outputs = teacher.generate(prompts, sampling_params) if prompts else []
 
             for prompt_idx, output in zip(generated_prompt_indices, outputs):
@@ -163,15 +189,24 @@ You can speak normally before <think> to plan your strategy, but once you emit <
                         )
                         + "\n"
                     )
+                    total_saved_traces += 1
+                    if total_saved_traces >= target_samples:
+                        break
+                if total_saved_traces >= target_samples:
+                    break
 
             f.flush()
             print(
-                f"Finished documents {starting_doc_index} through "
-                f"{starting_doc_index + batch_num_docs - 1}",
+                f"[Saved: {total_saved_traces}/{target_samples}] Scanned docs "
+                f"{starting_doc_index}..{starting_doc_index + batch_num_docs - 1}",
                 flush=True,
             )
+            starting_doc_index += batch_num_docs
 
-    del teacher
+    print(
+        f"\nSuccessfully collected {total_saved_traces} reasoning traces in {filename}"
+    )
+    del teacher, student_model
     gc.collect()
 
 
