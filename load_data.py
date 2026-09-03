@@ -112,6 +112,221 @@ def create_grpo_dataset(
     return IterableDataset.from_generator(gen)
 
 
+def score_document(
+    scorer_model: Any,
+    token_ids: list[int],
+    scorer_device: Any = "cuda:0",
+    score_window_len: int = 16,
+) -> tuple[torch.Tensor, torch.Tensor] | None:
+    if scorer_model is None:
+        return None
+
+    device = scorer_device
+    full_ids = torch.tensor([token_ids], dtype=torch.long, device=device)
+    with torch.no_grad():
+        outputs = scorer_model(input_ids=full_ids)
+        logits = outputs.logits[:, :-1, :]
+        log_probs = F.log_softmax(logits, dim=-1)
+        targets = full_ids[:, 1:]
+        token_log_probs = log_probs.gather(2, targets.unsqueeze(-1)).squeeze(
+            -1
+        )  # (1, T-1)
+
+        if score_window_len > 1 and token_log_probs.shape[-1] >= score_window_len:
+            k_len = score_window_len
+            kernel = (
+                torch.ones(1, 1, k_len, device=device, dtype=token_log_probs.dtype)
+                / k_len
+            )
+            conv_out = (
+                F.conv1d(token_log_probs.unsqueeze(1), kernel).squeeze(0).squeeze(0)
+            )  # (T - k_len,)
+        else:
+            conv_out = token_log_probs.squeeze(0)
+
+        return token_log_probs.squeeze(0), conv_out
+
+
+def create_grpo_dataset_good_splits(
+    tokenizer,
+    samples_per_doc: int = 1,
+    min_prefix_len: int = 128,
+    max_prefix_len: int = 2048,
+    continuation_length: int = 16,
+    dataset_path: str = "open-web-math/open-web-math",
+    seed: int = 0,
+    force_open_think: bool = True,
+    scorer_model: Any = None,
+    scorer_device: str | None = None,
+    min_logprob: float | None = -4.5,
+    max_logprob: float | None = -1.0,
+    score_window_len: int = 16,
+    max_rolling_logprob: float | None = -0.8,
+    filter_multidomain: bool = True,
+    split: str = "train",
+    num_proc: int = 8,
+    cache_dir: str = "/scratch/datasets/openwebmath",
+    shuffle_buffer_size: int | None = None,
+) -> IterableDataset:
+    if isinstance(dataset_path, (Dataset, IterableDataset)):
+        raw_data: Any = dataset_path
+    elif os.path.exists(dataset_path):
+        raw_data = load_from_disk(dataset_path).shuffle(seed=seed)
+    else:
+        raw_data = load_dataset(
+            dataset_path,
+            split=split,
+            num_proc=num_proc,
+            cache_dir=cache_dir,
+        ).shuffle(seed=seed)
+
+    if scorer_device is not None:
+        effective_device = scorer_device
+    elif scorer_model is not None:
+        try:
+            effective_device = next(scorer_model.parameters()).device
+        except Exception:
+            effective_device = "cuda:0" if torch.cuda.is_available() else "cpu"
+    else:
+        effective_device = "cuda:0" if torch.cuda.is_available() else "cpu"
+
+    generator = torch.Generator().manual_seed(seed)
+
+    def gen():
+        for item in raw_data:
+            doc_text = item["text"]
+            if not doc_text:
+                continue
+
+            ascii_and_math = sum(
+                1
+                for c in doc_text
+                if ord(c) < 128
+                or 0x0370 <= ord(c) <= 0x03FF
+                or 0x2100 <= ord(c) <= 0x22FF
+            )
+            if (ascii_and_math / len(doc_text)) < 0.85:
+                continue
+
+            tokenized_doc = tokenizer(
+                doc_text,
+                add_special_tokens=False,
+                truncation=True,
+                max_length=max_prefix_len + continuation_length + 256,
+            )["input_ids"]
+            token_ids = _int_ids(tokenized_doc)
+            n = len(token_ids)
+            max_split_point = min(n - continuation_length, max_prefix_len)
+
+            if max_split_point <= min_prefix_len + 1:
+                continue
+
+            candidate_splits = []
+            if filter_multidomain:
+                char_splits = find_multidomain_splits(doc_text)
+                seen_splits = set()
+                for char_idx in char_splits:
+                    prefix_ids = tokenizer(
+                        doc_text[:char_idx], add_special_tokens=False
+                    )["input_ids"]
+                    plen = len(prefix_ids)
+                    if (
+                        min_prefix_len + 1 <= plen <= max_split_point
+                        and plen not in seen_splits
+                    ):
+                        seen_splits.add(plen)
+                        candidate_splits.append(plen)
+            else:
+                num_rand = max(samples_per_doc * 10, 50)
+                candidate_splits = torch.randint(
+                    min_prefix_len + 1,
+                    max_split_point,
+                    (num_rand,),
+                    generator=generator,
+                ).tolist()
+
+            if not candidate_splits:
+                continue
+
+            valid_splits = []
+            if scorer_model is not None and (
+                min_logprob is not None
+                or max_logprob is not None
+                or max_rolling_logprob is not None
+            ):
+                scoring_result = score_document(
+                    scorer_model,
+                    token_ids,
+                    scorer_device=effective_device,
+                    score_window_len=score_window_len,
+                )
+                if scoring_result is not None:
+                    token_lps, conv_lps = scoring_result
+                    for sp in candidate_splits:
+                        target_idx = sp - 1
+                        if target_idx < 0 or target_idx >= len(token_lps):
+                            continue
+
+                        first_tok_lp = token_lps[target_idx].item()
+                        if (
+                            min_logprob is not None
+                            and first_tok_lp < min_logprob
+                        ):
+                            continue
+                        if (
+                            max_logprob is not None
+                            and first_tok_lp > max_logprob
+                        ):
+                            continue
+
+                        if max_rolling_logprob is not None and target_idx < len(
+                            conv_lps
+                        ):
+                            rolling_mean = conv_lps[target_idx].item()
+                            if rolling_mean > max_rolling_logprob:
+                                continue
+
+                        valid_splits.append(sp)
+                else:
+                    valid_splits = candidate_splits
+            else:
+                valid_splits = candidate_splits
+
+            if not valid_splits:
+                continue
+
+            shuffled_indices = torch.randperm(
+                len(valid_splits), generator=generator
+            ).tolist()
+            yielded_for_doc = 0
+            for idx in shuffled_indices:
+                split_point = valid_splits[idx]
+                prefix_ids = token_ids[:split_point]
+                continuation_ids = token_ids[
+                    split_point : split_point + continuation_length
+                ]
+                row = _grpo_row(
+                    tokenizer,
+                    prefix_ids,
+                    continuation_ids,
+                    force_open_think=force_open_think,
+                )
+                if row is not None:
+                    yield row
+                    yielded_for_doc += 1
+                    if yielded_for_doc >= samples_per_doc:
+                        break
+
+    dataset = IterableDataset.from_generator(gen)
+    if shuffle_buffer_size is not None:
+        dataset = dataset.shuffle(
+            seed=seed,
+            buffer_size=shuffle_buffer_size,
+            max_buffer_input_shards=1,
+        )
+    return dataset
+
+
 def create_grpo_overfit_dataset(
     tokenizer,
     samples_per_doc: int,

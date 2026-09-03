@@ -20,7 +20,7 @@ def parse_args():
     parser.add_argument("--model-path", type=str, default="/scratch/hub/qwen3_1.7b_sft_merged")
     parser.add_argument("--base-model-name", type=str, default="Qwen/Qwen3-1.7B-Base")
     parser.add_argument("--cache-dir", type=str, default="/scratch/hub")
-    parser.add_argument("--dataset-path", type=str, default="/scratch/datasets/openwebmath_600k")
+    parser.add_argument("--dataset-path", type=str, default="/scratch/datasets/openwebmath2M")
     parser.add_argument("--output-file", type=str, default="positive_delta_traces.jsonl")
     parser.add_argument("--total-docs", type=int, default=25000)
     parser.add_argument("--batch-size", type=int, default=4)

@@ -39,7 +39,7 @@ def parse_args():
     p.add_argument("--model-path", default=BASE)
     p.add_argument("--adapter-path", default=None)
     p.add_argument("--label", default="model")
-    p.add_argument("--dataset-path", default="/scratch/datasets/openwebmath_600k")
+    p.add_argument("--dataset-path", default="/scratch/datasets/openwebmath2M")
     p.add_argument("--doc-offset", type=int, default=400_000)
     p.add_argument("--n-positions", type=int, default=64)
     p.add_argument("--g", type=int, default=16)

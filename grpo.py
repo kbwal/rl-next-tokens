@@ -18,7 +18,7 @@ from transformers import (
 )
 from trl.trainer.grpo_trainer import GRPOTrainer
 from trl.trainer.grpo_config import GRPOConfig
-from load_data import create_grpo_dataset_full
+from load_data import create_grpo_dataset_good_splits
 
 
 class ContinuationReward:
@@ -136,7 +136,7 @@ class LengthPenaltyReward:
         return [-self.alpha * float(len(c)) for c in completion_ids]
 
 
-run_name = "grpo-scratchpad-data-full-run-5"
+run_name = "grpo-good-split-data-full-run-1"
 parser = argparse.ArgumentParser()
 parser.add_argument("--seed", type=int, default=1)
 parser.add_argument("--g", type=int, default=8)
@@ -149,7 +149,6 @@ parser.add_argument("--format-penalty", type=float, default=3.0)
 parser.add_argument("--min-prefix-len", type=int, default=128)
 parser.add_argument("--max-prefix-len", type=int, default=2048)
 parser.add_argument("--continuation-length", type=int, default=16)
-parser.add_argument("--dataset-path", type=str, default="open-web-math/open-web-math")
 parser.add_argument("--max-steps", type=int, default=2000)
 parser.add_argument("--max-checkpoints", type=int, default=1)
 parser.add_argument("--wandb", action="store_true")
@@ -170,7 +169,7 @@ torch.cuda.set_device(device)
 device_map = {"": device}
 model_name, cache_dir = "Qwen/Qwen3-1.7B-Base", "/scratch/hub"
 adapter_path = (
-    "./sft-checkpoints/sft-new-scratchpad-data-checkpoints/run-32-0.0003-1.0/batch_276"
+    "./sft-checkpoints/sft-good-splits-checkpoints/run-32-0.0003-1.0/batch_123"
 )
 
 tokenizer = AutoTokenizer.from_pretrained(model_name, cache_dir=cache_dir)
@@ -200,6 +199,15 @@ model = model.merge_and_unload()  # type: ignore
 model = cast(PreTrainedModel, model)
 for p in model.parameters():
     p.requires_grad = True
+
+scorer_model = AutoModelForCausalLM.from_pretrained(
+    model_name,
+    cache_dir=cache_dir,
+    device_map=device_map,
+    attn_implementation="sdpa",
+)
+scorer_model.eval()
+scorer_model.requires_grad_(False)
 
 closethink_id = tokenizer.convert_tokens_to_ids("</think>")
 grpo_config = GRPOConfig(
@@ -235,15 +243,16 @@ grpo_config = GRPOConfig(
     use_liger_kernel=True,
 )
 
-train_dataset = create_grpo_dataset_full(
+train_dataset = create_grpo_dataset_good_splits(
     tokenizer=tokenizer,
     samples_per_doc=1,
     min_prefix_len=args.min_prefix_len,
     max_prefix_len=args.max_prefix_len,
     continuation_length=args.continuation_length,
-    dataset_path=args.dataset_path,
+    dataset_path="/scratch/datasets/openwebmath2M",
     seed=SEED,
     force_open_think=True,
+    scorer_model=scorer_model,
 )
 
 trainer = GRPOTrainer(
@@ -253,7 +262,7 @@ trainer = GRPOTrainer(
         ContinuationReward(model, tokenizer),
         FormatPenaltyReward(format_penalty=FORMAT_PENALTY),
         LengthPenaltyReward(alpha=ALPHA),
-    ],
+    ],  # type: ignore
     args=grpo_config,
     train_dataset=train_dataset,
 )
