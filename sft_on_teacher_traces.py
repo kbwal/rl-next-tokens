@@ -113,14 +113,15 @@ def collate_teacher_batch(batch):
 parser = argparse.ArgumentParser()
 parser.add_argument("--seed", type=int, default=0)
 parser.add_argument("--r", type=int, default=16)
-parser.add_argument("--b", type=int, default=8)
+parser.add_argument("--b", type=int, default=4)
 parser.add_argument("--lr", type=float, default=3e-4)
 parser.add_argument("--alpha", type=float, default=0.25)
 parser.add_argument(
     "--data-file",
     type=Path,
-    default=Path("./teacher_traces/scratchpad_prompt_traces.jsonl"),
+    default=Path("./teacher_traces/good_split_traces_clean.jsonl"),
 )
+parser.add_argument("--run-name", type=str, default="sft-good-splits")
 parser.add_argument("--checkpoint-root", type=Path, default=Path("./sft-checkpoints"))
 parser.add_argument("--max-checkpoints", type=int, default=1)
 parser.add_argument("--wandb", action="store_true")
@@ -153,7 +154,7 @@ config = {
     "seed": SEED,
 }
 
-run_name = "sft-new-scratchpad-data"
+run_name = args.run_name
 if args.wandb:
     wandb.init(
         project="rl-ntp",
