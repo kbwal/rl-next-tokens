@@ -1,5 +1,6 @@
 import os
 
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 os.environ["WANDB_PROJECT"] = "rl-ntp"
 
 import argparse
@@ -18,7 +19,7 @@ from transformers import (
 )
 from trl.trainer.grpo_trainer import GRPOTrainer
 from trl.trainer.grpo_config import GRPOConfig
-from load_data import create_grpo_dataset_good_splits
+from datasets import load_from_disk
 
 
 class ContinuationReward:
@@ -26,10 +27,12 @@ class ContinuationReward:
         self,
         model: PreTrainedModel,
         tokenizer: PreTrainedTokenizerBase,
+        continuation_length: int = 16,
         batch_size: int = 32,
     ):
         self.model = model
         self.tokenizer = tokenizer
+        self.continuation_length = continuation_length
         self.batch_size = batch_size
 
     def __call__(
@@ -49,7 +52,10 @@ class ContinuationReward:
         prompt_ids = self.tokenizer(prompts)["input_ids"]
         prompt_ids = [[int(t) for t in p] for p in prompt_ids]
         completion_ids = [[int(t) for t in c] for c in completion_ids]
-        cont_ids = [[int(t) for t in c] for c in continuation_ids]
+        cont_ids = [
+            [int(t) for t in c[: self.continuation_length]]
+            for c in continuation_ids
+        ]
 
         # note: this only works if the lengths of the continuations are the same
         # otherwise it won't, and it just cuts off to the min
@@ -144,12 +150,12 @@ parser.add_argument("--b", type=int, default=8)
 parser.add_argument("--temperature", type=float, default=1.0)
 parser.add_argument("--max-new-tokens", type=int, default=2048)
 parser.add_argument("--lr", type=float, default=1e-6)
-parser.add_argument("--alpha", type=float, default=0.0005)
+parser.add_argument("--alpha", type=float, default=0.0)
 parser.add_argument("--format-penalty", type=float, default=3.0)
 parser.add_argument("--min-prefix-len", type=int, default=128)
 parser.add_argument("--max-prefix-len", type=int, default=2048)
 parser.add_argument("--continuation-length", type=int, default=16)
-parser.add_argument("--max-steps", type=int, default=2000)
+parser.add_argument("--max-steps", type=int, default=10)
 parser.add_argument("--max-checkpoints", type=int, default=1)
 parser.add_argument("--wandb", action="store_true")
 args = parser.parse_args()
@@ -200,15 +206,6 @@ model = cast(PreTrainedModel, model)
 for p in model.parameters():
     p.requires_grad = True
 
-scorer_model = AutoModelForCausalLM.from_pretrained(
-    model_name,
-    cache_dir=cache_dir,
-    device_map=device_map,
-    attn_implementation="sdpa",
-)
-scorer_model.eval()
-scorer_model.requires_grad_(False)
-
 closethink_id = tokenizer.convert_tokens_to_ids("</think>")
 grpo_config = GRPOConfig(
     output_dir=str(CHECKPOINT_ROOT),
@@ -231,7 +228,7 @@ grpo_config = GRPOConfig(
     # warmup_ratio=0.05,
     logging_steps=1,
     save_strategy="steps",
-    save_steps=100,
+    save_steps=20,
     save_total_limit=MAX_CHECKPOINTS,
     report_to="wandb" if args.wandb else "none",
     # num_train_epochs=100,
@@ -243,23 +240,25 @@ grpo_config = GRPOConfig(
     use_liger_kernel=True,
 )
 
-train_dataset = create_grpo_dataset_good_splits(
-    tokenizer=tokenizer,
-    samples_per_doc=1,
-    min_prefix_len=args.min_prefix_len,
-    max_prefix_len=args.max_prefix_len,
-    continuation_length=args.continuation_length,
-    dataset_path="/scratch/datasets/openwebmath2M",
-    seed=SEED,
-    force_open_think=True,
-    scorer_model=scorer_model,
+train_dataset = load_from_disk(
+    "/scratch/datasets/openwebmath_good_splits"
+).shuffle(seed=SEED)
+train_dataset = train_dataset.map(
+    lambda x: {
+        "prompt": x["prompt"] + "<think>"
+        if not x["prompt"].endswith("<think>")
+        else x["prompt"]
+    },
+    num_proc=8,
 )
 
 trainer = GRPOTrainer(
     model=model,
     processing_class=tokenizer,
     reward_funcs=[
-        ContinuationReward(model, tokenizer),
+        ContinuationReward(
+            model, tokenizer, continuation_length=args.continuation_length
+        ),
         FormatPenaltyReward(format_penalty=FORMAT_PENALTY),
         LengthPenaltyReward(alpha=ALPHA),
     ],  # type: ignore
