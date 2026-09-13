@@ -3,7 +3,7 @@ import json
 import os
 from pathlib import Path
 import torch
-from datasets import Dataset, concatenate_datasets, load_from_disk
+from datasets import Dataset, concatenate_datasets, load_dataset, load_from_disk
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from load_data import create_grpo_dataset_good_splits
@@ -16,13 +16,13 @@ def main():
     parser.add_argument(
         "--dataset-path",
         type=str,
-        default="/scratch/datasets/openwebmath2M",
+        default="/scratch/datasets/finemath-4plus",
         help="Path to source corpus (disk path or HF dataset name)",
     )
     parser.add_argument(
         "--output-dir",
         type=str,
-        default="/scratch/datasets/openwebmath_good_splits",
+        default="/scratch/datasets/finemath_good_splits",
         help="Directory to save the pre-generated dataset",
     )
     parser.add_argument(
@@ -131,7 +131,11 @@ def main():
 
     if world_size > 1:
         corpus = (
-            load_from_disk(args.dataset_path)
+            load_dataset(
+                args.dataset_path,
+                split="train",
+                cache_dir="/scratch/datasets/.cache/huggingface",
+            )
             .shard(num_shards=world_size, index=rank, contiguous=True)  # type: ignore
             .shuffle(seed=seed)
         )

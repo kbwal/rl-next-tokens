@@ -2,7 +2,7 @@
 
 A work-in-progress project exploring whether language models can learn to "think" (`<think>...</think>`) before predicting next-token continuations during pretraining, without task-specific verifiers or ground-truth answer checkers.
 
-Currently experimenting on [OpenWebMath](https://huggingface.co/datasets/open-web-math/open-web-math), though I'll probably pivot to a cleaner dataset like [FineMath](https://huggingface.co/datasets/HuggingFaceTB/finemath) soon (the results on OpenWebMath, even with custom split points in documents, didn't work too well tbh).
+Currently running on [FineMath-4plus](https://huggingface.co/datasets/HuggingFaceTB/finemath) (the 4+/5 educational-math slice, ~6.7M docs on `/scratch`). I originally tried [OpenWebMath](https://huggingface.co/datasets/open-web-math/open-web-math), even with custom split points in documents, and it didn't work too well tbh (hence the pivot).
 
 ---
 
@@ -37,7 +37,7 @@ Since cold-starting RL on a base model didn't pan out, I switched to a two-stage
   - **Continuation logprobs**: logprob of the next K ground-truth tokens (note: this is another difference from Nvidia! They used strictly K=1 for everything, whereas I've done runs with differing values of K between 1 and 64).
   - **Format penalty**: penalizes unclosed or repeated `<think>` tags (I'm not strictly sure if this is necessary! It seems to not matter too much, as I make `</think>` an EOS, so it should be auto-punished for not formatting right anyways)
   - **Length penalty**: this technically exists, so I should mention it, but in practice I'm setting this to 0 in all of my runs.
-- **Result:** Better than direct RLP, but subject to pretty big failure modes. The biggest one I'm seeing right now is length collapse. I'm suspecting this is due to the quality of the data, and nothink being a strong strange attractor basin that's hard to fall out of if a decent chunk of prompts aren't improved by thinking (i.e. the data quality isn't as good as I'd hope).
+- **Result:** Better than direct RLP, but subject to pretty big failure modes. The biggest one I saw on OpenWebMath is length collapse. I'm suspecting this is due to the quality of the data, and nothink being a strong strange attractor basin that's hard to fall out of if a decent chunk of prompts aren't improved by thinking (i.e. the data quality isn't as good as I'd hope; the reason for switching to FineMath-4plus!)
 
 ---
 

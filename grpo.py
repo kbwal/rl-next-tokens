@@ -53,8 +53,7 @@ class ContinuationReward:
         prompt_ids = [[int(t) for t in p] for p in prompt_ids]
         completion_ids = [[int(t) for t in c] for c in completion_ids]
         cont_ids = [
-            [int(t) for t in c[: self.continuation_length]]
-            for c in continuation_ids
+            [int(t) for t in c[: self.continuation_length]] for c in continuation_ids
         ]
 
         # note: this only works if the lengths of the continuations are the same
@@ -240,14 +239,16 @@ grpo_config = GRPOConfig(
     use_liger_kernel=True,
 )
 
-train_dataset = load_from_disk(
-    "/scratch/datasets/openwebmath_good_splits"
-).shuffle(seed=SEED)
+train_dataset = load_from_disk("/scratch/datasets/finemath_good_splits").shuffle(
+    seed=SEED
+)
 train_dataset = train_dataset.map(
     lambda x: {
-        "prompt": x["prompt"] + "<think>"
-        if not x["prompt"].endswith("<think>")
-        else x["prompt"]
+        "prompt": (
+            x["prompt"] + "<think>"
+            if not x["prompt"].endswith("<think>")
+            else x["prompt"]
+        )
     },
     num_proc=8,
 )
@@ -263,7 +264,7 @@ trainer = GRPOTrainer(
         LengthPenaltyReward(alpha=ALPHA),
     ],  # type: ignore
     args=grpo_config,
-    train_dataset=train_dataset,
+    train_dataset=train_dataset,  # type: ignore
 )
 
 trainer.train()

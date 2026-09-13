@@ -2,7 +2,7 @@ import copy
 import os
 import re
 from typing import Any
-from datasets import Dataset, IterableDataset, load_dataset, load_from_disk
+from datasets import Dataset, IterableDataset, load_dataset
 import torch
 import torch.nn.functional as F
 
@@ -65,53 +65,6 @@ def _load_streaming_corpus(
     ).shuffle(seed=seed, buffer_size=1, max_buffer_input_shards=1)
 
 
-def create_grpo_dataset(
-    tokenizer,
-    samples_per_doc: int,
-    min_prefix_len: int,
-    max_prefix_len: int,
-    continuation_length: int,
-    dataset_path: str,
-    seed: int,
-    force_open_think: bool = True,
-) -> IterableDataset:
-    raw_data: Any = load_from_disk(dataset_path).shuffle(seed=seed)
-    generator = torch.Generator().manual_seed(seed)
-
-    def gen():
-        for item in raw_data:
-            text = item["text"]
-            token_ids = tokenizer(text, add_special_tokens=False)["input_ids"]
-            n = len(token_ids)
-            max_split_point = min(n - continuation_length, max_prefix_len)
-
-            if max_split_point <= min_prefix_len + 1:
-                continue
-
-            split_points = torch.randint(
-                min_prefix_len + 1,
-                max_split_point,
-                (samples_per_doc,),
-                generator=generator,
-            ).tolist()
-
-            for split_point in split_points:
-                prefix_ids = token_ids[:split_point]
-                continuation_ids = token_ids[
-                    split_point : split_point + continuation_length
-                ]
-                row = _grpo_row(
-                    tokenizer,
-                    prefix_ids,
-                    continuation_ids,
-                    force_open_think=force_open_think,
-                )
-                if row is not None:
-                    yield row
-
-    return IterableDataset.from_generator(gen)
-
-
 def score_document(
     scorer_model: Any,
     token_ids: list[int],
@@ -153,7 +106,7 @@ def create_grpo_dataset_good_splits(
     min_prefix_len: int = 128,
     max_prefix_len: int = 2048,
     continuation_length: int = 16,
-    dataset_path: str = "open-web-math/open-web-math",
+    dataset_path: str = "/scratch/datasets/finemath-4plus",
     seed: int = 0,
     force_open_think: bool = True,
     scorer_model: Any = None,
@@ -165,13 +118,11 @@ def create_grpo_dataset_good_splits(
     filter_multidomain: bool = True,
     split: str = "train",
     num_proc: int = 8,
-    cache_dir: str = "/scratch/datasets/openwebmath",
+    cache_dir: str = "/scratch/datasets/.cache/huggingface",
     shuffle_buffer_size: int | None = None,
 ) -> IterableDataset:
     if isinstance(dataset_path, (Dataset, IterableDataset)):
         raw_data: Any = dataset_path
-    elif os.path.exists(dataset_path):
-        raw_data = load_from_disk(dataset_path).shuffle(seed=seed)
     else:
         raw_data = load_dataset(
             dataset_path,
@@ -268,15 +219,9 @@ def create_grpo_dataset_good_splits(
                             continue
 
                         first_tok_lp = token_lps[target_idx].item()
-                        if (
-                            min_logprob is not None
-                            and first_tok_lp < min_logprob
-                        ):
+                        if min_logprob is not None and first_tok_lp < min_logprob:
                             continue
-                        if (
-                            max_logprob is not None
-                            and first_tok_lp > max_logprob
-                        ):
+                        if max_logprob is not None and first_tok_lp > max_logprob:
                             continue
 
                         if max_rolling_logprob is not None and target_idx < len(
@@ -327,69 +272,16 @@ def create_grpo_dataset_good_splits(
     return dataset
 
 
-def create_grpo_overfit_dataset(
+def create_grpo_dataset(
     tokenizer,
     samples_per_doc: int,
     min_prefix_len: int,
     max_prefix_len: int,
     continuation_length: int,
-    dataset_path: str,
-    seed: int,
-    num_samples: int = 8,
-    force_open_think: bool = True,
-) -> Dataset:
-    raw_data: Any = load_from_disk(dataset_path).shuffle(seed=seed)
-    generator = torch.Generator().manual_seed(seed)
-
-    samples = []
-    for item in raw_data:
-        text = item["text"]
-        token_ids = tokenizer(text, add_special_tokens=False)["input_ids"]
-        n = len(token_ids)
-        max_split_point = min(n - continuation_length, max_prefix_len)
-
-        if max_split_point <= min_prefix_len + 1:
-            continue
-
-        split_points = torch.randint(
-            min_prefix_len + 1,
-            max_split_point,
-            (samples_per_doc,),
-            generator=generator,
-        ).tolist()
-
-        for split_point in split_points:
-            prefix_ids = token_ids[:split_point]
-            continuation_ids = token_ids[
-                split_point : split_point + continuation_length
-            ]
-            row = _grpo_row(
-                tokenizer,
-                prefix_ids,
-                continuation_ids,
-                force_open_think=force_open_think,
-            )
-            if row is None:
-                continue
-            samples.append(row)
-            if len(samples) >= num_samples:
-                break
-        if len(samples) >= num_samples:
-            break
-
-    return Dataset.from_list(samples)
-
-
-def create_grpo_dataset_full(
-    tokenizer,
-    samples_per_doc: int,
-    min_prefix_len: int,
-    max_prefix_len: int,
-    continuation_length: int,
-    dataset_path: str = "open-web-math/open-web-math",
+    dataset_path: str = "/scratch/datasets/finemath-4plus",
     seed: int = 0,
     split: str = "train",
-    cache_dir: str = "/scratch/datasets/openwebmath",
+    cache_dir: str = "/scratch/datasets/.cache/huggingface",
     force_open_think: bool = True,
     shuffle_buffer_size: int = 5_000,
 ) -> IterableDataset:
@@ -440,178 +332,17 @@ def create_grpo_dataset_full(
     )
 
 
-def create_grpo_overfit_dataset_full(
-    tokenizer,
-    samples_per_doc: int,
-    min_prefix_len: int,
-    max_prefix_len: int,
-    continuation_length: int,
-    dataset_path: str = "open-web-math/open-web-math",
-    seed: int = 0,
-    num_samples: int = 8,
-    split: str = "train",
-    num_proc: int = 8,
-    cache_dir: str = "/scratch/datasets/openwebmath",
-    force_open_think: bool = True,
-) -> Dataset:
-    raw_data: Any = load_dataset(
-        dataset_path,
-        split=split,
-        num_proc=num_proc,
-        cache_dir=cache_dir,
-    ).shuffle(seed=seed)
-    generator = torch.Generator().manual_seed(seed)
-
-    samples = []
-    for item in raw_data:
-        text = item["text"]
-        token_ids = tokenizer(text, add_special_tokens=False)["input_ids"]
-        n = len(token_ids)
-        max_split_point = min(n - continuation_length, max_prefix_len)
-
-        if max_split_point <= min_prefix_len + 1:
-            continue
-
-        split_points = torch.randint(
-            min_prefix_len + 1,
-            max_split_point,
-            (samples_per_doc,),
-            generator=generator,
-        ).tolist()
-
-        for split_point in split_points:
-            prefix_ids = token_ids[:split_point]
-            continuation_ids = token_ids[
-                split_point : split_point + continuation_length
-            ]
-            row = _grpo_row(
-                tokenizer,
-                prefix_ids,
-                continuation_ids,
-                force_open_think=force_open_think,
-            )
-            if row is None:
-                continue
-            samples.append(row)
-            if len(samples) >= num_samples:
-                break
-        if len(samples) >= num_samples:
-            break
-
-    return Dataset.from_list(samples)
-
-
 def create_grpo_base_dataset(
     tokenizer,
-    samples_per_doc: int,
-    min_prefix_len: int,
-    max_prefix_len: int,
-    continuation_length: int,
-    dataset_path: str,
-    seed: int,
-    instruction: str,
-) -> IterableDataset:
-    raw_data: Any = load_from_disk(dataset_path).shuffle(seed=seed)
-    generator = torch.Generator().manual_seed(seed)
-
-    def gen():
-        for item in raw_data:
-            text = item["text"]
-            token_ids = tokenizer(text, add_special_tokens=False)["input_ids"]
-            n = len(token_ids)
-            max_split_point = min(n - continuation_length, max_prefix_len)
-
-            if max_split_point <= min_prefix_len + 1:
-                continue
-
-            split_points = torch.randint(
-                min_prefix_len + 1,
-                max_split_point,
-                (samples_per_doc,),
-                generator=generator,
-            ).tolist()
-
-            for split_point in split_points:
-                prefix_ids = token_ids[:split_point]
-                continuation_ids = token_ids[
-                    split_point : split_point + continuation_length
-                ]
-                row = _grpo_row(
-                    tokenizer,
-                    prefix_ids,
-                    continuation_ids,
-                    instruction=instruction,
-                )
-                if row is not None:
-                    yield row
-
-    return IterableDataset.from_generator(gen)
-
-
-def create_grpo_base_overfit_dataset(
-    tokenizer,
-    samples_per_doc: int,
-    min_prefix_len: int,
-    max_prefix_len: int,
-    continuation_length: int,
-    dataset_path: str,
-    seed: int,
-    instruction: str,
-    num_samples: int = 8,
-) -> Dataset:
-    raw_data: Any = load_from_disk(dataset_path).shuffle(seed=seed)
-    generator = torch.Generator().manual_seed(seed)
-
-    samples = []
-    for item in raw_data:
-        text = item["text"]
-        token_ids = tokenizer(text, add_special_tokens=False)["input_ids"]
-        n = len(token_ids)
-        max_split_point = min(n - continuation_length, max_prefix_len)
-
-        if max_split_point <= min_prefix_len + 1:
-            continue
-
-        split_points = torch.randint(
-            min_prefix_len + 1,
-            max_split_point,
-            (samples_per_doc,),
-            generator=generator,
-        ).tolist()
-
-        for split_point in split_points:
-            prefix_ids = token_ids[:split_point]
-            continuation_ids = token_ids[
-                split_point : split_point + continuation_length
-            ]
-            row = _grpo_row(
-                tokenizer,
-                prefix_ids,
-                continuation_ids,
-                instruction=instruction,
-            )
-            if row is None:
-                continue
-            samples.append(row)
-            if len(samples) >= num_samples:
-                break
-        if len(samples) >= num_samples:
-            break
-
-    return Dataset.from_list(samples)
-
-
-def create_grpo_base_dataset_full(
-    tokenizer,
-    samples_per_doc: int,
-    min_prefix_len: int,
-    max_prefix_len: int,
-    continuation_length: int,
-    dataset_path: str = "open-web-math/open-web-math",
+    samples_per_doc: int = 1,
+    min_prefix_len: int = 128,
+    max_prefix_len: int = 2048,
+    continuation_length: int = 16,
+    dataset_path: str = "/scratch/datasets/finemath-4plus",
     seed: int = 0,
     instruction: str = "",
     split: str = "train",
-    cache_dir: str = "/scratch/datasets/openwebmath",
+    cache_dir: str = "/scratch/datasets/.cache/huggingface",
     shuffle_buffer_size: int = 5_000,
 ) -> IterableDataset:
     tokenizer = copy.deepcopy(tokenizer)
@@ -661,76 +392,15 @@ def create_grpo_base_dataset_full(
     )
 
 
-def create_grpo_base_overfit_dataset_full(
-    tokenizer,
-    samples_per_doc: int,
-    min_prefix_len: int,
-    max_prefix_len: int,
-    continuation_length: int,
-    dataset_path: str = "open-web-math/open-web-math",
-    seed: int = 0,
-    instruction: str = "",
-    num_samples: int = 8,
-    split: str = "train",
-    num_proc: int = 8,
-    cache_dir: str = "/scratch/datasets/openwebmath",
-) -> Dataset:
-    raw_data: Any = load_dataset(
-        dataset_path,
-        split=split,
-        num_proc=num_proc,
-        cache_dir=cache_dir,
-    ).shuffle(seed=seed)
-    generator = torch.Generator().manual_seed(seed)
-
-    samples = []
-    for item in raw_data:
-        text = item["text"]
-        token_ids = tokenizer(text, add_special_tokens=False)["input_ids"]
-        n = len(token_ids)
-        max_split_point = min(n - continuation_length, max_prefix_len)
-
-        if max_split_point <= min_prefix_len + 1:
-            continue
-
-        split_points = torch.randint(
-            min_prefix_len + 1,
-            max_split_point,
-            (samples_per_doc,),
-            generator=generator,
-        ).tolist()
-
-        for split_point in split_points:
-            prefix_ids = token_ids[:split_point]
-            continuation_ids = token_ids[
-                split_point : split_point + continuation_length
-            ]
-            row = _grpo_row(
-                tokenizer,
-                prefix_ids,
-                continuation_ids,
-                instruction=instruction,
-            )
-            if row is None:
-                continue
-            samples.append(row)
-            if len(samples) >= num_samples:
-                break
-        if len(samples) >= num_samples:
-            break
-
-    return Dataset.from_list(samples)
-
-
 class TrainingDataset:
     def __init__(
         self,
         tokenizer,
         seed: int = 0,
-        dataset_path: str = "open-web-math/open-web-math",
+        dataset_path: str = "/scratch/datasets/finemath-4plus",
         split: str = "train",
         num_proc: int = 8,
-        cache_dir: str = "/scratch/datasets/openwebmath",
+        cache_dir: str = "/scratch/datasets/.cache/huggingface",
     ):
         self.data = load_dataset(
             dataset_path,
@@ -883,18 +553,18 @@ class ReasoningSplitsDataset:
         scorer_model: Any = None,
         scorer_device: str = "cuda:0",
         seed: int = 0,
-        dataset_path: str = "open-web-math/open-web-math",
+        dataset_path: str = "/scratch/datasets/finemath-4plus",
         split: str = "train",
         num_proc: int = 8,
-        cache_dir: str = "/scratch/datasets/openwebmath",
+        cache_dir: str = "/scratch/datasets/.cache/huggingface",
         min_logprob: float | None = -4.5,
         max_logprob: float | None = -1.0,
         score_window_len: int = 16,
         max_rolling_logprob: float | None = -0.8,
         filter_multidomain: bool = True,
     ):
-        if os.path.exists(dataset_path):
-            self.data = load_from_disk(dataset_path).shuffle(seed=seed)
+        if isinstance(dataset_path, (Dataset, IterableDataset)):
+            self.data = dataset_path
         else:
             self.data = load_dataset(
                 dataset_path,
@@ -916,7 +586,7 @@ class ReasoningSplitsDataset:
         return len(self.data)
 
     def get_document_batch(self, starting_doc_index: int, num_docs: int) -> list[str]:
-        return self.data[starting_doc_index : starting_doc_index + num_docs]["text"]
+        return self.data[starting_doc_index : starting_doc_index + num_docs]["text"]  # type: ignore
 
     def score_document(
         self, token_ids: list[int]

@@ -11,8 +11,8 @@ def main():
     teacher_model_path = "/scratch/hub/gemma4_31b/models--Intel--gemma-4-31B-it-int4-AutoRound/snapshots/a428c96a57976947b0f12735f0cf5fcae69019ad"
     student_model_name = "Qwen/Qwen3-1.7B-Base"
     cache_dir = "/scratch/hub"
-    dataset_path = "open-web-math/open-web-math"
-    dataset_cache_dir = "/scratch/datasets/openwebmath"
+    dataset_path = "/scratch/datasets/finemath-4plus"
+    dataset_cache_dir = "/scratch/datasets/.cache/huggingface"
 
     tokenizer = AutoTokenizer.from_pretrained(teacher_model_path)
     student_tokenizer = AutoTokenizer.from_pretrained(
@@ -56,10 +56,10 @@ You can speak normally before <think> to plan your strategy, but once you emit <
 </think>"""
     system_prompt_len = len(tokenizer.encode(system_prompt))
     max_prefix_len = max_model_len - max_tokens - system_prompt_len - 256  # jic buffer
-    filename = f"./teacher_traces/good_split_traces.jsonl"
+    filename = f"./teacher_traces/finemath_traces.jsonl"
     os.makedirs(os.path.dirname(filename), exist_ok=True)
 
-    target_samples = 500
+    target_samples = 1000
     B = 50
     num_samples_per_doc = 1
     min_prefix_len = 128
