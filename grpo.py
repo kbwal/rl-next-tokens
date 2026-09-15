@@ -141,7 +141,7 @@ class LengthPenaltyReward:
         return [-self.alpha * float(len(c)) for c in completion_ids]
 
 
-run_name = "grpo-good-split-data-full-run-1"
+run_name = "grpo-finemath-full-run-1"
 parser = argparse.ArgumentParser()
 parser.add_argument("--seed", type=int, default=1)
 parser.add_argument("--g", type=int, default=8)
@@ -174,7 +174,7 @@ torch.cuda.set_device(device)
 device_map = {"": device}
 model_name, cache_dir = "Qwen/Qwen3-1.7B-Base", "/scratch/hub"
 adapter_path = (
-    "./sft-checkpoints/sft-good-splits-checkpoints/run-32-0.0003-1.0/batch_123"
+    "./sft-checkpoints/sft-finemath-checkpoints/run-32-0.0003-1.0/batch_121"
 )
 
 tokenizer = AutoTokenizer.from_pretrained(model_name, cache_dir=cache_dir)

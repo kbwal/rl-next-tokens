@@ -2,7 +2,7 @@
 
 A work-in-progress project exploring whether language models can learn to "think" (`<think>...</think>`) before predicting next-token continuations during pretraining, without task-specific verifiers or ground-truth answer checkers.
 
-Currently running on [FineMath-4plus](https://huggingface.co/datasets/HuggingFaceTB/finemath) (the 4+/5 educational-math slice, ~6.7M docs on `/scratch`). I originally tried [OpenWebMath](https://huggingface.co/datasets/open-web-math/open-web-math), even with custom split points in documents, and it didn't work too well tbh (hence the pivot).
+Currently running on [FineMath-4plus](https://huggingface.co/datasets/HuggingFaceTB/finemath). I originally tried [OpenWebMath](https://huggingface.co/datasets/open-web-math/open-web-math), even with custom split points in documents, and it didn't work too well tbh.
 
 ---
 
