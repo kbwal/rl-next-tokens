@@ -214,7 +214,7 @@ def merge_bbh_results(
     output_file: str | None = None,
 ) -> dict[str, Any] | None:
     if model_names is None:
-        model_names = ["base", "sft", "grpo80", "grpo300"]
+        model_names = ["base", "sft", "grpo300"]
 
     merged_models: dict[str, Any] = {}
     n_examples = None
@@ -251,8 +251,8 @@ def merge_bbh_results(
         "mean_logprob": {m: merged_models[m]["mean_logprob"] for m in merged_models},
         "info_gain_vs_base": {
             m: merged_models[m]["mean_logprob"] - base_mean
-            for m in ["sft", "grpo80", "grpo300"]
-            if m in merged_models
+            for m in model_names
+            if m != "base" and m in merged_models
         },
         "mean_seq_logprob": {
             m: merged_models[m].get(
@@ -262,8 +262,8 @@ def merge_bbh_results(
         },
         "seq_info_gain_vs_base": {
             m: merged_models[m].get("mean_seq_logprob", 0.0) - base_seq_mean
-            for m in ["sft", "grpo80", "grpo300"]
-            if m in merged_models
+            for m in model_names
+            if m != "base" and m in merged_models
         },
         "mean_thought_length": {
             m: merged_models[m]["mean_thought_length"] for m in merged_models
@@ -354,9 +354,9 @@ def benchmark_bbh(
     n_examples: int = 50,
     data_dir: str = "./data/bbh",
     base_model_path: str = "Qwen/Qwen3-1.7B-Base",
-    sft_adapter_path: str = "./sft-checkpoints/sft-good-splits-checkpoints/run-32-0.0003-1.0/batch_123",
-    grpo80_path: str = "./grpo-checkpoints/important-checkpoints/checkpoint-80-91d428mf",
-    grpo300_path: str = "./grpo-checkpoints/grpo-good-split-data-full-run-1-checkpoints/checkpoint-300",
+    sft_adapter_path: str = "./sft-checkpoints/sft-finemath-checkpoints/run-32-0.0003-1.0/batch_121",
+    grpo_dir: str = "./grpo-checkpoints/grpo-finemath-full-run-1-checkpoints",
+    grpo300_path: str | None = None,
     cache_dir: str = "/scratch/hub",
     batch_size: int = 16,
     seed: int = 10,
@@ -369,6 +369,15 @@ def benchmark_bbh(
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
     rank = int(os.environ.get("LOCAL_RANK", os.environ.get("RANK", "0")))
     device = f"cuda:{rank}" if torch.cuda.is_available() else "cpu"
+
+    if grpo300_path is None:
+        if os.path.exists(os.path.join(grpo_dir, "config.json")):
+            grpo300_path = grpo_dir
+        elif os.path.isdir(os.path.join(grpo_dir, "checkpoint-300")):
+            grpo300_path = os.path.join(grpo_dir, "checkpoint-300")
+        else:
+            possible_path = os.path.join(grpo_dir, "checkpoint-300")
+            grpo300_path = possible_path if os.path.exists(possible_path) else grpo_dir
 
     is_distributed = world_size > 1
     if is_distributed and not dist.is_initialized():
@@ -383,7 +392,6 @@ def benchmark_bbh(
             "path": base_model_path,
             "adapter": sft_adapter_path,
         },
-        {"name": "grpo80", "type": "causal", "path": grpo80_path, "adapter": None},
         {"name": "grpo300", "type": "causal", "path": grpo300_path, "adapter": None},
     ]
 
@@ -561,7 +569,20 @@ def benchmark_bbh(
     if is_distributed:
         dist.barrier()
         if rank == 0:
-            merge_bbh_results(task=task, results_dir="results")
+            res_dir = "results"
+            out_file = None
+            if output_json is not None:
+                if os.path.isdir(output_json) or output_json.endswith("/"):
+                    res_dir = output_json
+                else:
+                    res_dir = os.path.dirname(os.path.abspath(output_json))
+                    out_file = output_json
+            merge_bbh_results(
+                task=task,
+                results_dir=res_dir,
+                model_names=[m["name"] for m in models],
+                output_file=out_file,
+            )
         dist.destroy_process_group()
 
     return results
@@ -573,6 +594,27 @@ if __name__ == "__main__":
     parser.add_argument("--data-dir", type=str, default="./data/bbh")
     parser.add_argument("--n", type=int, default=50)
     parser.add_argument("--b", type=int, default=16)
+    parser.add_argument(
+        "--grpo-dir",
+        "--grpo-folder",
+        "--grpo-path",
+        dest="grpo_dir",
+        type=str,
+        default="./grpo-checkpoints/grpo-finemath-full-run-1-checkpoints",
+        help="Path to GRPO checkpoints folder or checkpoint-300 directory",
+    )
+    parser.add_argument(
+        "--sft-path",
+        type=str,
+        default="./sft-checkpoints/sft-finemath-checkpoints/run-32-0.0003-1.0/batch_121",
+        help="Path to SFT adapter",
+    )
+    parser.add_argument(
+        "--base-model-path",
+        type=str,
+        default="Qwen/Qwen3-1.7B-Base",
+        help="Base model path or huggingface model ID",
+    )
     parser.add_argument(
         "--output",
         type=str,
@@ -588,6 +630,9 @@ if __name__ == "__main__":
         task=args.task,
         n_examples=args.n,
         data_dir=args.data_dir,
+        base_model_path=args.base_model_path,
+        sft_adapter_path=args.sft_path,
+        grpo_dir=args.grpo_dir,
         batch_size=args.b,
         output_json=args.output,
         force_open_think=not args.no_force_think,
